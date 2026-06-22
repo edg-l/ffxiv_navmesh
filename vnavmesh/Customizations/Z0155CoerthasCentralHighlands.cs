@@ -1,12 +1,14 @@
-﻿using System.Numerics;
+﻿using DotRecast.Detour;
+using Navmesh.GroundGraph;
 using System.Collections.Generic;
+using System.Numerics;
 
 namespace Navmesh.Customizations;
 
 [CustomizationTerritory(155)]
 class Z0155CoerthasCentralHighlands : NavmeshCustomization
 {
-    public override int Version => 7;
+    public override int Version => 8;
 
     public override void CustomizeScene(SceneExtractor scene)
     {
@@ -19,21 +21,30 @@ class Z0155CoerthasCentralHighlands : NavmeshCustomization
                 inst.ForceSetPrimFlags |= SceneExtractor.PrimitiveFlags.ForceWalkable;
     }
 
+    public override void CustomizeSettings(DtNavMeshCreateParams config)
+    {
+    }
+
     public override void CustomizeMesh(Navmesh mesh, List<uint> festivalLayers)
+    {
+        base.CustomizeMesh(mesh, festivalLayers);
+    }
+
+    public override void CustomizeGround(QuadGraph graph, List<uint> festivalLayers)
     {
         // doorway in Whitebrim Front
         List<Vector3> doorwayWhitebrim = [new(-454.47195f, 211.4575f, -291.54233f), new(-457.46005f, 211.4575f, -291.67108f)];
-        for (var i = 0; i<doorwayWhitebrim.Count-1; i++)
+        for (var i = 0; i < doorwayWhitebrim.Count - 1; i++)
         {
-            LinkPoints(mesh, doorwayWhitebrim[i], doorwayWhitebrim[i+1], Navmesh.AreaId.Shortcut);
-            LinkPoints(mesh, doorwayWhitebrim[i+1], doorwayWhitebrim[i], Navmesh.AreaId.Shortcut);
+            LinkQuads(graph, doorwayWhitebrim[i], doorwayWhitebrim[i + 1], Navmesh.AreaId.Shortcut);
+            LinkQuads(graph, doorwayWhitebrim[i + 1], doorwayWhitebrim[i], Navmesh.AreaId.Shortcut);
         }
         // doorway between observatorium and dragonhead
         List<Vector3> doorwayMartiallais = [new(198.35889f, 257f, 76.33306f), new(205.2478f, 256.14615f, 83.13481f)];
-        for (var i = 0; i<doorwayMartiallais.Count-1; i++)
+        for (var i = 0; i < doorwayMartiallais.Count - 1; i++)
         {
-            LinkPoints(mesh, doorwayMartiallais[i], doorwayMartiallais[i+1], Navmesh.AreaId.Shortcut);
-            LinkPoints(mesh, doorwayMartiallais[i+1], doorwayMartiallais[i], Navmesh.AreaId.Shortcut);
+            LinkQuads(graph, doorwayMartiallais[i], doorwayMartiallais[i + 1], Navmesh.AreaId.Shortcut);
+            LinkQuads(graph, doorwayMartiallais[i + 1], doorwayMartiallais[i], Navmesh.AreaId.Shortcut);
         }
 
         // parapet at Dragonhead
@@ -49,10 +60,10 @@ class Z0155CoerthasCentralHighlands : NavmeshCustomization
             new(266.03177f, 324f, -156.23119f),
             new(261.66354f, 323.969f, -156.22154f)
         ];
-        for (var i = 0; i<walkway.Count-1; i++)
+        for (var i = 0; i < walkway.Count - 1; i++)
         {
-            LinkPoints(mesh, walkway[i], walkway[i+1], Navmesh.AreaId.Shortcut);
-            LinkPoints(mesh, walkway[i+1], walkway[i], Navmesh.AreaId.Shortcut);
+            LinkQuads(graph, walkway[i], walkway[i + 1], Navmesh.AreaId.Shortcut);
+            LinkQuads(graph, walkway[i + 1], walkway[i], Navmesh.AreaId.Shortcut);
         }
     }
 }

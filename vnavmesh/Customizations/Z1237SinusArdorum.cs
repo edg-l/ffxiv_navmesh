@@ -1,4 +1,6 @@
-﻿using System;
+﻿using DotRecast.Detour;
+using Navmesh.GroundGraph;
+using System;
 using System.Collections.Generic;
 using System.Numerics;
 using System.Runtime.InteropServices;
@@ -8,7 +10,7 @@ namespace Navmesh.Customizations;
 [CustomizationTerritory(1237)]
 internal class Z1237SinusArdorum : NavmeshCustomization
 {
-	public override int Version => 5;
+	public override int Version => 6;
 
 	public override void CustomizeScene(SceneExtractor scene)
 	{
@@ -54,7 +56,16 @@ internal class Z1237SinusArdorum : NavmeshCustomization
 	const float pi = MathF.PI;
 	const float hpi = pi / 2;
 
+	public override void CustomizeSettings(DtNavMeshCreateParams config)
+	{
+	}
+
 	public override void CustomizeMesh(Navmesh mesh, List<uint> festivalLayers)
+	{
+		base.CustomizeMesh(mesh, festivalLayers);
+	}
+
+	public override void CustomizeGround(QuadGraph graph, List<uint> festivalLayers)
 	{
 		(Vector3 DepartPoint, Vector3 ArrivePoint) getPoints(Vector3 worldPos, Vector3 rotation)
 		{
@@ -69,8 +80,8 @@ internal class Z1237SinusArdorum : NavmeshCustomization
 			var (depA, arrA) = getPoints(pointAPos, pointARotation);
 			var (depB, arrB) = getPoints(pointBPos, pointBRotation);
 
-			LinkPoints(mesh, depA, arrB);
-			LinkPoints(mesh, depB, arrA);
+			LinkQuads(graph, depA, arrB);
+			LinkQuads(graph, depB, arrA);
 		}
 
 		#region base liners
@@ -116,9 +127,9 @@ internal class Z1237SinusArdorum : NavmeshCustomization
 
 		#region NE caves
 		// NE -> downstairs
-		LinkPoints(mesh, new(322.35117f, 43, -306.3f), new(404.5141f, -56.8f, -375.2349f));
+		LinkQuads(graph, new(322.35117f, 43, -306.3f), new(404.5141f, -56.8f, -375.2349f));
 		// downstairs -> NE
-		LinkPoints(mesh, new(390.42264f, -57, -394.7571f), new(308.2982f, 43.2f, -325.8215f));
+		LinkQuads(graph, new(390.42264f, -57, -394.7571f), new(308.2982f, 43.2f, -325.8215f));
 
 		// downstairs <-> NNEE
 		addCosmoliner(new(433.426f, -59.5f, -415.135f), new(0, -0.873f, 0), new(624.088f, -74.5f, -556.224f), new(-pi, -0.908f, -pi));
@@ -127,9 +138,9 @@ internal class Z1237SinusArdorum : NavmeshCustomization
 		addCosmoliner(new(657.776f, -74.5f, -552.088f), new(-pi, 0.663f, pi), new(868, -58, -374), new(0, 0.873f, 0));
 
 		// NNEE -> loop
-		LinkPoints(mesh, new(625.157f, -71.970f, -583.71f), new(366.911f, -117.3f, -834.9056f));
-		LinkPoints(mesh, new(388.186f, -117.470f, -848.963f), new(622.1744f, -108.3f, -944.7515f));
-		LinkPoints(mesh, new(646.472f, -108.480f, -924.356f), new(646.622f, -71.8f, -592.223f));
+		LinkQuads(graph, new(625.157f, -71.970f, -583.71f), new(366.911f, -117.3f, -834.9056f));
+		LinkQuads(graph, new(388.186f, -117.470f, -848.963f), new(622.1744f, -108.3f, -944.7515f));
+		LinkQuads(graph, new(646.472f, -108.480f, -924.356f), new(646.622f, -71.8f, -592.223f));
 		#endregion
 
 		#region SE
@@ -151,9 +162,9 @@ internal class Z1237SinusArdorum : NavmeshCustomization
 
 		#region SW crater
 		// SS -> tunnel
-		LinkPoints(mesh, new(-122.029f, 55, 740.012f), new(-316.2774f, 55.2f, 740));
+		LinkQuads(graph, new(-122.029f, 55, 740.012f), new(-316.2774f, 55.2f, 740));
 		// tunnel -> SS
-		LinkPoints(mesh, new(-317.979f, 55, 759.97f), new(-123.75f, 55.2f, 760));
+		LinkQuads(graph, new(-317.979f, 55, 759.97f), new(-123.75f, 55.2f, 760));
 
 		// crater SE <-> N
 		addCosmoliner(new(-340, 50.5f, 726), default, new(-596, 50, 390), new(0, -hpi, 0));

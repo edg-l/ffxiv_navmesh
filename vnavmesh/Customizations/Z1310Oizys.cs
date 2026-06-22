@@ -1,16 +1,17 @@
-﻿using Navmesh;
+﻿using DotRecast.Detour;
+using Navmesh.GroundGraph;
 using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Numerics;
 using System.Runtime.InteropServices;
 
-namespace vnavmesh.Customizations;
+namespace Navmesh.Customizations;
 
 [CustomizationTerritory(1310)]
 internal class Z1310Oizys : NavmeshCustomization
 {
-	public override int Version => 2;
+	public override int Version => 3;
 
 	public override void CustomizeScene(SceneExtractor scene)
 	{
@@ -52,7 +53,16 @@ internal class Z1310Oizys : NavmeshCustomization
 	const float pi = MathF.PI;
 	const float hpi = pi / 2;
 
-	public override void CustomizeMesh(Navmesh.Navmesh mesh, List<uint> festivalLayers)
+	public override void CustomizeSettings(DtNavMeshCreateParams config)
+	{
+	}
+
+	public override void CustomizeMesh(Navmesh mesh, List<uint> festivalLayers)
+	{
+		base.CustomizeMesh(mesh, festivalLayers);
+	}
+
+	public override void CustomizeGround(QuadGraph graph, List<uint> festivalLayers)
 	{
 		(Vector3 DepartPoint, Vector3 ArrivePoint) getPoints(Vector3 worldPos, Vector3 rotation)
 		{
@@ -67,8 +77,8 @@ internal class Z1310Oizys : NavmeshCustomization
 			var (depA, arrA) = getPoints(pointAPos, pointARotation);
 			var (depB, arrB) = getPoints(pointBPos, pointBRotation);
 
-			LinkPoints(mesh, depA, arrB);
-			LinkPoints(mesh, depB, arrA);
+			LinkQuads(graph, depA, arrB);
+			LinkQuads(graph, depB, arrA);
 		}
 
 		void addSoloLiner(Vector3 pointAPos, Vector3 pointARotation, Vector3 pointBPos, Vector3 pointBRotation)
@@ -78,13 +88,13 @@ internal class Z1310Oizys : NavmeshCustomization
 			var ptA = pointAPos + adjA;
 			var ptB = pointBPos + adjB;
 
-			LinkPoints(mesh, ptA, ptB);
+			LinkQuads(graph, ptA, ptB);
 		}
 
 		var festivalPhase = festivalLayers.LastOrDefault() >> 16;
 
 		// add jump down point for a raised rock that a drone spawns on
-		LinkPoints(mesh, new(148.5f, -92, -540), new(150.25f, -92.725f, -536f));
+		LinkQuads(graph, new(148.5f, -92, -540), new(150.25f, -92.725f, -536f));
 
 		#region base
 		// base -> N
@@ -223,4 +233,3 @@ internal class Z1310Oizys : NavmeshCustomization
 		#endregion
 	}
 }
-

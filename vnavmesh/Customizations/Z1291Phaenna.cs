@@ -1,4 +1,6 @@
-﻿using System;
+﻿using DotRecast.Detour;
+using Navmesh.GroundGraph;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Numerics;
@@ -9,7 +11,7 @@ namespace Navmesh.Customizations;
 [CustomizationTerritory(1291)]
 internal class Z1291Phaenna : NavmeshCustomization
 {
-	public override int Version => 5;
+	public override int Version => 6;
 
 	public override void CustomizeScene(SceneExtractor scene)
 	{
@@ -59,7 +61,16 @@ internal class Z1291Phaenna : NavmeshCustomization
 	const float pi = MathF.PI;
 	const float hpi = pi / 2;
 
+	public override void CustomizeSettings(DtNavMeshCreateParams config)
+	{
+	}
+
 	public override void CustomizeMesh(Navmesh mesh, List<uint> festivalLayers)
+	{
+		base.CustomizeMesh(mesh, festivalLayers);
+	}
+
+	public override void CustomizeGround(QuadGraph graph, List<uint> festivalLayers)
 	{
 		(Vector3 DepartPoint, Vector3 ArrivePoint) getPoints(Vector3 worldPos, Vector3 rotation)
 		{
@@ -74,8 +85,8 @@ internal class Z1291Phaenna : NavmeshCustomization
 			var (depA, arrA) = getPoints(pointAPos, pointARotation);
 			var (depB, arrB) = getPoints(pointBPos, pointBRotation);
 
-			LinkPoints(mesh, depA, arrB);
-			LinkPoints(mesh, depB, arrA);
+			LinkQuads(graph, depA, arrB);
+			LinkQuads(graph, depB, arrA);
 		}
 
 		var festivalVersion = festivalLayers.FirstOrDefault() >> 16;
