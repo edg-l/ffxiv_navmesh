@@ -85,12 +85,9 @@ public class FollowPath : IDisposable
 				break;
 			}
 
-			if (IgnoreDeltaY)
-			{
-				a.Y = 0;
-				b.Y = 0;
-				c.Y = 0;
-			}
+			a.Y = 0;
+			b.Y = 0;
+			c.Y = 0;
 
 			if (DistanceToLineSegment(a, b, c) > Tolerance)
 				break;
