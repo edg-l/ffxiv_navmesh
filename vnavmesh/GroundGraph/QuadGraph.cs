@@ -109,6 +109,70 @@ public class QuadGraph
 
         return false;
     }
+
+    public int NearestQuad(Vector3 p, float maxDist = float.MaxValue)
+    {
+        int best = -1;
+        float bestDist = maxDist;
+        for (int i = 0; i < Quads.Count; ++i)
+        {
+            var q = Quads[i];
+            if (q.ContainsXZ(p))
+            {
+                var dy = MathF.Abs(p.Y - q.MinY);
+                if (dy < bestDist)
+                {
+                    bestDist = dy;
+                    best = i;
+                }
+            }
+        }
+        if (best >= 0)
+            return best;
+
+        for (int i = 0; i < Quads.Count; ++i)
+        {
+            var q = Quads[i];
+            var center = q.Center;
+            var d = (center - p).LengthSquared();
+            if (d < bestDist)
+            {
+                bestDist = d;
+                best = i;
+            }
+        }
+        return best;
+    }
+
+    public List<Vector3> Pathfind(Vector3 from, Vector3 to, bool useRaycast, bool useStringPulling, float range, System.Threading.CancellationToken cancel)
+    {
+        var fromQuad = NearestQuad(from);
+        var toQuad = NearestQuad(to);
+        if (fromQuad < 0 || toQuad < 0)
+            return [];
+
+        var pathfinder = new QuadPathfind(this);
+        var path = range > 0
+            ? pathfinder.FindPathWithRange(fromQuad, toQuad, from, to, range, useRaycast, cancel)
+            : pathfinder.FindPath(fromQuad, toQuad, from, to, useRaycast, cancel);
+
+        if (path.Count == 0)
+            return [];
+
+        if (useStringPulling)
+        {
+            var simplified = FunnelStringPull.Pull(this, path, from, to);
+            return simplified;
+        }
+        else
+        {
+            var res = new List<Vector3> { from };
+            foreach (var (_, p) in path)
+                res.Add(p);
+            res.Add(to);
+            return res;
+        }
+    }
 }
 
 public readonly record struct Portal(int FromQuad, int ToQuad, Vector2 SpanMin, Vector2 SpanMax, float YFrom, float YTo, bool IsOffMesh, Navmesh.AreaId Area);
