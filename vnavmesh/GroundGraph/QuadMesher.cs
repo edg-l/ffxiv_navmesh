@@ -26,6 +26,8 @@ public static class QuadMesher
         var cellsZ = leafLevel.NumCellsZ;
         var cellsY = leafLevel.NumCellsY;
 
+        Service.Log.Debug($"[ground] leaf level: cells={cellsX}x{cellsY}x{cellsZ}, cellSize={cellSize}, levels={volume.Levels.Length}");
+
         var (minX, minY, minZ) = WorldToLeafIndex(volume, boundsMin, leafLevel);
         var (maxX, maxY, maxZ) = WorldToLeafIndex(volume, boundsMax, leafLevel);
         minX = Math.Max(0, minX);
@@ -34,6 +36,12 @@ public static class QuadMesher
         maxX = Math.Min(cellsX - 1, maxX);
         maxY = Math.Min(cellsY - 1, maxY);
         maxZ = Math.Min(cellsZ - 1, maxZ);
+
+        Service.Log.Debug($"[ground] scan range: x=[{minX},{maxX}] y=[{minY},{maxY}] z=[{minZ},{maxZ}]");
+
+        int walkableCount = 0;
+        int occupiedCount = 0;
+        int emptyCount = 0;
 
         var visited = new bool[cellsX * cellsZ];
         var surfaceY = new float[cellsX * cellsZ];
@@ -52,12 +60,18 @@ public static class QuadMesher
                     var abovePos = LeafIndexToWorld(volume, x, y, z, leafLevel);
                     var aboveVoxel = volume.FindLeafVoxel(abovePos);
                     if (aboveVoxel.empty)
+                        emptyCount++;
+                    else
+                        occupiedCount++;
+
+                    if (aboveVoxel.empty)
                     {
                         var belowPos = LeafIndexToWorld(volume, x, y - 1, z, leafLevel);
                         var belowVoxel = volume.FindLeafVoxel(belowPos);
                         if (!belowVoxel.empty)
                         {
                             walkable[idx] = true;
+                            walkableCount++;
                             var solidTopY = belowPos.Y + cellSize.Y * 0.5f;
                             surfaceY[idx] = solidTopY;
                         }
@@ -96,6 +110,7 @@ public static class QuadMesher
             }
         }
 
+        Service.Log.Debug($"[ground] voxel stats: {walkableCount} walkable, {occupiedCount} occupied, {emptyCount} empty, {graph.Count} quads");
         return graph;
     }
 
