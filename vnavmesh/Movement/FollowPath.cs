@@ -139,8 +139,6 @@ public class FollowPath : IDisposable
 		OverrideAFK.ResetTimers();
 		_movement.Enabled = MovementAllowed;
 		_movement.DesiredPosition = Waypoints[0].Position;
-		_movement.LastDt = fwk.UpdateDelta.Milliseconds / 1000f;
-		_movement.MaxTurnRateDeg = Service.Config.MoveMaxTurnRate;
 			if (_movement.DesiredPosition.Y > player.Position.Y && !Service.Condition[ConditionFlag.InFlight] && !Service.Condition[ConditionFlag.Diving] && !IgnoreDeltaY) //Only do this bit if on a flying path
 			{
 				// walk->fly transition (TODO: reconsider?)

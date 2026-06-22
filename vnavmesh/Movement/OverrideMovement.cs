@@ -44,10 +44,6 @@ public unsafe class OverrideMovement : IDisposable
     public bool IgnoreUserInput;
     public Vector3 DesiredPosition;
     public float Precision = 0.01f;
-    public float MaxTurnRateDeg = 720f;
-    public float LastDt = 0.016f;
-
-    private float _lastDesiredAzimuth;
 
     // true if player (or some other plugin) is pressing keys
     public bool UserInput { get; private set; }
@@ -132,15 +128,7 @@ public unsafe class OverrideMovement : IDisposable
             ? ((CameraEx*)CameraManager.Instance()->GetActiveCamera())->DirH.Radians() + 180.Degrees()
             : player.Rotation.Radians();
 
-        var desiredAzimuth = (dirH - refDir).Rad;
-        var azimuthDelta = desiredAzimuth - _lastDesiredAzimuth;
-        while (azimuthDelta > MathF.PI) azimuthDelta -= 2 * MathF.PI;
-        while (azimuthDelta < -MathF.PI) azimuthDelta += 2 * MathF.PI;
-        var maxDelta = MaxTurnRateDeg * MathF.PI / 180f * LastDt;
-        azimuthDelta = Math.Clamp(azimuthDelta, -maxDelta, maxDelta);
-        _lastDesiredAzimuth += azimuthDelta;
-
-        return (new Angle(_lastDesiredAzimuth), dirV);
+        return (dirH - refDir, dirV);
     }
 
     private void OnConfigChanged(object? sender, ConfigChangeEvent evt) => UpdateLegacyMode();
