@@ -12,24 +12,19 @@ public class MainWindow : Window, IDisposable
 	private DebugDrawer _dd = new();
 	private DebugGameCollision _debugGameColl;
 	private DebugNavmeshManager _debugNavmeshManager;
-	private DebugNavmeshCustom _debugNavmeshCustom;
 	private DebugLayout _debugLayout;
-	private string _configDirectory;
 
 	public MainWindow(NavmeshManager manager, FollowPath path, AsyncMoveRequest move, DTRProvider dtr, string configDir) : base("Navmesh")
 	{
 		_path = path;
-		_configDirectory = configDir;
 		_debugGameColl = new(_dd);
 		_debugNavmeshManager = new(_dd, _debugGameColl, manager, path, move, dtr);
-		_debugNavmeshCustom = new(_dd, _debugGameColl, manager, _configDirectory);
 		_debugLayout = new(_dd, _debugGameColl);
 	}
 
 	public void Dispose()
 	{
 		_debugLayout.Dispose();
-		_debugNavmeshCustom.Dispose();
 		_debugNavmeshManager.Dispose();
 		_debugGameColl.Dispose();
 		_dd.Dispose();
@@ -80,9 +75,6 @@ public class MainWindow : Window, IDisposable
 				using (var tab = ImRaii.TabItem("Navmesh manager"))
 					if (tab)
 						_debugNavmeshManager.Draw();
-				using (var tab = ImRaii.TabItem("Navmesh custom"))
-					if (tab)
-						_debugNavmeshCustom.Draw();
 			}
 		}
 	}

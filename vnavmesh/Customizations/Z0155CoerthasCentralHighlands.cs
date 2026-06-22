@@ -1,5 +1,4 @@
-﻿using DotRecast.Detour;
-using Navmesh.GroundGraph;
+﻿using Navmesh.GroundGraph;
 using System.Collections.Generic;
 using System.Numerics;
 
@@ -19,15 +18,6 @@ class Z0155CoerthasCentralHighlands : NavmeshCustomization
         if (scene.Meshes.TryGetValue("bg/ffxiv/roc_r1/fld/r1f1/collision/r1f1_b7_astr1.pcb", out var tower))
             foreach (var inst in tower.Instances)
                 inst.ForceSetPrimFlags |= SceneExtractor.PrimitiveFlags.ForceWalkable;
-    }
-
-    public override void CustomizeSettings(DtNavMeshCreateParams config)
-    {
-    }
-
-    public override void CustomizeMesh(Navmesh mesh, List<uint> festivalLayers)
-    {
-        base.CustomizeMesh(mesh, festivalLayers);
     }
 
     public override void CustomizeGround(QuadGraph graph, List<uint> festivalLayers)

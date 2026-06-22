@@ -1,6 +1,7 @@
 ﻿using Dalamud.Game.ClientState.Conditions;
 using FFXIVClientStructs.FFXIV.Client.LayoutEngine;
 using FFXIVClientStructs.FFXIV.Common.Component.BGCollision.Math;
+using Navmesh.GroundGraph;
 using Navmesh.Movement;
 using System;
 using System.Collections.Generic;
@@ -108,13 +109,12 @@ public sealed class NavmeshManager : IDisposable
 				Navmesh = navmesh;
 				Query = new(Navmesh);
 
-				var ff = await FloodFill.GetAsync();
-				if (ff.TryLookup(scene.TerritoryID, out var points))
-				{
-					Prune(points);
-					if (Navmesh?.Ground != null)
-						PruneGround(Navmesh.Ground, points);
-				}
+			var ff = await FloodFill.GetAsync();
+			if (ff.TryLookup(scene.TerritoryID, out var points))
+			{
+				if (Navmesh?.Ground != null)
+					PruneGround(Navmesh.Ground, points);
+			}
 
 				OnNavmeshChanged?.Invoke(Navmesh, Query);
 			}, cts.Token);
@@ -167,10 +167,11 @@ public sealed class NavmeshManager : IDisposable
 	// note: pixelSize should be power-of-2
 	public (Vector3 min, Vector3 max) BuildBitmap(Vector3 startingPos, string filename, float pixelSize, AABB? mapBounds = null)
 	{
-		if (Navmesh == null || Query == null)
-			throw new InvalidOperationException($"Can't build bitmap - navmesh creation is in progress");
+		if (Navmesh == null || Query == null || Navmesh.Ground == null)
+			throw new InvalidOperationException($"Can't build bitmap - navmesh creation is in progress or ground graph is missing");
 
-		bool inBounds(Vector3 vert) => mapBounds is not AABB aabb || vert.X >= aabb.Min.X && vert.Y >= aabb.Min.Y && vert.Z >= aabb.Min.Z && vert.X <= aabb.Max.X && vert.Y <= aabb.Max.Y && vert.Z <= aabb.Max.Z;
+		var ground = Navmesh.Ground;
+		bool inBounds(Quad q) => mapBounds is not AABB aabb || q.MinX >= aabb.Min.X && q.MinY >= aabb.Min.Y && q.MinZ >= aabb.Min.Z && q.MaxX <= aabb.Max.X && q.MaxY <= aabb.Max.Y && q.MaxZ <= aabb.Max.Z;
 
 		var startPoly = Query.FindNearestMeshPoly(startingPos);
 		var reachablePolys = Query.FindReachableMeshPolys(startPoly);
@@ -180,29 +181,20 @@ public sealed class NavmeshManager : IDisposable
 		Vector3 min = new(1024), max = new(-1024);
 		foreach (var p in reachablePolys)
 		{
-			Navmesh.Mesh.GetTileAndPolyByRefUnsafe(p, out var tile, out var poly);
-			for (int i = 0; i < poly.vertCount; ++i)
-			{
-				var v = NavmeshBitmap.GetVertex(tile, poly.verts[i]);
-				if (!inBounds(v))
-					goto cont;
+			if (p < 0 || p >= ground.Quads.Count)
+				continue;
+			var q = ground.Quads[(int)p];
+			if (!inBounds(q))
+				continue;
 
-				min = Vector3.Min(min, v);
-				max = Vector3.Max(max, v);
-				//Service.Log.Debug($"{p:X}.{i}= {v}");
-			}
-
+			min = Vector3.Min(min, new(q.MinX, q.MinY, q.MinZ));
+			max = Vector3.Max(max, new(q.MaxX, q.MaxY, q.MaxZ));
 			polysInbounds.Add(p);
-
-		cont:;
 		}
-		//Service.Log.Debug($"bounds: {min}-{max}");
 
 		var bitmap = new NavmeshBitmap(min, max, pixelSize);
 		foreach (var p in polysInbounds)
-		{
-			bitmap.RasterizePolygon(Navmesh.Mesh, p);
-		}
+			bitmap.RasterizePolygon(ground.Quads[(int)p]);
 		bitmap.Save(filename);
 		Service.Log.Debug($"Generated nav bitmap '{filename}' @ {startingPos}: {bitmap.MinBounds}-{bitmap.MaxBounds}");
 		return (bitmap.MinBounds, bitmap.MaxBounds);
@@ -284,11 +276,10 @@ public sealed class NavmeshManager : IDisposable
 				Log($"Loading cache: {cache.FullName}");
 				using var stream = cache.OpenRead();
 				using var reader = new BinaryReader(stream);
-				var mesh = Navmesh.Deserialize(reader, customization.Version);
-				customization.CustomizeMesh(mesh, layers);
-				if (mesh.Ground != null)
-					customization.CustomizeGround(mesh.Ground, layers);
-				return mesh;
+			var mesh = Navmesh.Deserialize(reader, customization.Version);
+			if (mesh.Ground != null)
+				customization.CustomizeGround(mesh.Ground, layers);
+			return mesh;
 			}
 			catch (Exception ex)
 			{
@@ -313,7 +304,6 @@ public sealed class NavmeshManager : IDisposable
 			using var writer = new BinaryWriter(stream);
 			builder.Navmesh.Serialize(writer);
 		}
-		customization.CustomizeMesh(builder.Navmesh, layers);
 		if (builder.Navmesh.Ground != null)
 			customization.CustomizeGround(builder.Navmesh.Ground, layers);
 		deltaProgress += 0.01f;
@@ -366,48 +356,6 @@ public sealed class NavmeshManager : IDisposable
 	{
 		if (task.IsFaulted)
 			Service.Log.Error($"[NavmeshManager] Task failed with error: {task.Exception}");
-	}
-
-	public void Prune(IEnumerable<Vector3> points)
-	{
-		if (Navmesh == null || Query == null)
-			throw new InvalidOperationException("can't prune, mesh is missing");
-
-		var startPolys = points.Select(pt => Query.FindNearestMeshPoly(pt));
-		Log($"seeding from start polys: {string.Join(", ", startPolys.Select(p => p.ToString("X")))}");
-		var reachablePolys = Query.FindReachableMeshPolys([.. startPolys]);
-
-		var pruneCount = 0;
-		for (var i = 0; i < Navmesh.Mesh.GetMaxTiles(); i++)
-		{
-			var t = Navmesh.Mesh.GetTile(i);
-			if (t.data?.header == null)
-				continue;
-
-			var prBase = Navmesh.Mesh.GetPolyRefBase(t);
-			for (var j = 0; j < t.data.header.polyCount; j++)
-			{
-				var pref = prBase | (uint)j;
-				if (Navmesh.Mesh.GetPolyFlags(pref, out var fl).Failed())
-				{
-					Log($"failed to fetch flags for {pref:X}");
-					continue;
-				}
-				if (reachablePolys.Contains(pref))
-				{
-					if (Navmesh.Mesh.SetPolyFlags(pref, fl & ~Navmesh.FLAG_UNREACHABLE).Failed())
-						Log($"failed to set flags for {pref:X}");
-				}
-				else
-				{
-					pruneCount++;
-					if (Navmesh.Mesh.SetPolyFlags(pref, fl | Navmesh.FLAG_UNREACHABLE).Failed())
-						Log($"failed to set flags for {pref:X}");
-				}
-			}
-		}
-
-		Log($"pruned {pruneCount} unreachable polygons");
 	}
 
 	public void PruneGround(GroundGraph.QuadGraph graph, IEnumerable<Vector3> points)

@@ -1,10 +1,7 @@
-﻿using DotRecast.Detour;
-using DotRecast.Recast;
-using FFXIVClientStructs.FFXIV.Common.Component.BGCollision.Math;
+﻿using FFXIVClientStructs.FFXIV.Common.Component.BGCollision.Math;
 using Navmesh.GroundGraph;
 using System;
 using System.Collections.Generic;
-using System.Diagnostics.CodeAnalysis;
 using System.Linq;
 using System.Numerics;
 using System.Reflection;
@@ -32,10 +29,6 @@ public class NavmeshCustomization
 	// this is a customization point to add or remove colliders in the scene
 	public virtual void CustomizeScene(SceneExtractor scene) { }
 
-	public virtual void CustomizeSettings(DtNavMeshCreateParams config) { }
-
-	public virtual void CustomizeMesh(Navmesh mesh, List<uint> festivalLayers) { }
-
 	public virtual void CustomizeGround(QuadGraph graph, List<uint> festivalLayers) { }
 
 	protected static (int a, int b) LinkQuads(QuadGraph graph, Vector3 a, Vector3 b, Navmesh.AreaId area = Navmesh.AreaId.ClientPath)
@@ -43,86 +36,6 @@ public class NavmeshCustomization
 		var quadA = graph.AddOffMesh(a, b, area | Navmesh.AreaId.Endpoint);
 		var quadB = graph.NearestQuad(b);
 		return (quadA, quadB);
-	}
-
-	protected static (long refStart, long refEnd) LinkPoints(Navmesh nmesh, Vector3 startPos, Vector3 endPos, Navmesh.AreaId areaId = Navmesh.AreaId.ClientPath)
-	{
-		var mesh = nmesh.Mesh;
-		var refstart = InsertPointPoly(mesh, startPos, areaId);
-		var refend = InsertPointPoly(mesh, endPos, areaId | Navmesh.AreaId.Endpoint);
-
-		nmesh.Links.Add((mesh.GetPolyCenter(refstart).RecastToSystem(), mesh.GetPolyCenter(refend).RecastToSystem()));
-
-		mesh.GetTileAndPolyByRefUnsafe(refstart, out var startTile, out var startPoly);
-
-		// start point -> end point link
-		var idx = mesh.AllocLink(startTile);
-		DtLink link = startTile.links[idx];
-		link.refs = refend;
-		link.edge = 0;
-		link.side = 0;
-		link.bmin = link.bmax = 0;
-		link.next = startTile.polyLinks[startPoly.index];
-		startTile.polyLinks[startPoly.index] = idx;
-
-		return (refstart, refend);
-	}
-
-	private static long InsertPointPoly(DtNavMesh mesh, Vector3 pos, Navmesh.AreaId areaId)
-	{
-		var query = new DtNavMeshQuery(mesh);
-
-		var status = query.FindNearestPoly(pos.SystemToRecast(), new(5, 5, 5), new DtQueryDefaultFilter(), out var startRef, out var startPolyPoint, out _);
-		if (status.Failed() || startRef == 0)
-			throw new ArgumentException($"Unable to find a polygon corresponding with input point {pos}");
-
-		mesh.GetTileAndPolyByRefUnsafe(startRef, out var startTile, out var startPoly);
-		var p = new DtPoly(startTile.data.header.polyCount, 1)
-		{
-			vertCount = 1,
-			flags = 1
-		};
-		p.SetArea((int)areaId);
-		p.SetPolyType(DtPolyTypes.DT_POLYTYPE_OFFMESH_CONNECTION);
-		p.verts[0] = startTile.data.header.vertCount;
-
-		startTile.data.header.polyCount += 1;
-		startTile.data.header.vertCount += 1;
-		Array.Resize(ref startTile.data.polys, startTile.data.header.polyCount);
-		Array.Resize(ref startTile.data.verts, startTile.data.header.vertCount * 3);
-
-		// add new poly to mesh
-		startTile.data.polys[^1] = p;
-		startTile.data.verts[^3] = startPolyPoint.X;
-		startTile.data.verts[^2] = startPolyPoint.Y;
-		startTile.data.verts[^1] = startPolyPoint.Z;
-
-		Array.Resize(ref startTile.polyLinks, startTile.polyLinks.Length + 1);
-		startTile.polyLinks[^1] = DtNavMesh.DT_NULL_LINK;
-
-		var salt = DtNavMesh.DecodePolyIdSalt(startRef);
-		var pointRef = DtNavMesh.EncodePolyId(salt, startTile.index, p.index);
-
-		// link point to the polygon it lies inside
-		var idx = mesh.AllocLink(startTile);
-		var link = startTile.links[idx];
-		link.refs = startRef;
-		link.edge = 0;
-		link.side = 0xff;
-		link.bmin = link.bmax = 0;
-		startTile.polyLinks[p.index] = idx;
-
-		// link owning polygon to point
-		idx = mesh.AllocLink(startTile);
-		link = startTile.links[idx];
-		link.refs = pointRef;
-		link.edge = 0xff;
-		link.side = 0xff;
-		link.bmin = link.bmax = 0;
-		link.next = startTile.polyLinks[startPoly.index];
-		startTile.polyLinks[startPoly.index] = idx;
-
-		return pointRef;
 	}
 }
 
@@ -193,57 +106,5 @@ public static class SceneExtensions
 		var scale = (bounds.Max - bounds.Min) * 0.5f;
 		var transform = (bounds.Min + bounds.Max) * 0.5f;
 		InsertCylinderCollider(scene, scale, transform, forceSetFlags, forceClearFlags);
-	}
-}
-
-public static class CreateParamsExtensions
-{
-	public static void AddOffMeshConnection(this DtNavMeshCreateParams config, Vector3 ptA, Vector3 ptB, float radius = 0.5f, bool bidirectional = false, int userID = 0)
-	{
-		bool insideTile(Vector3 p) => p.X >= config.bmin.X && p.Y >= config.bmin.Y && p.Z >= config.bmin.Z && p.X <= config.bmax.X && p.Y <= config.bmax.Y && p.Z <= config.bmax.Z;
-
-		var aInside = insideTile(ptA);
-		var bInside = insideTile(ptB);
-
-		if (aInside != bInside)
-		{
-			Service.Log.Error("This off-mesh connection would span two tiles, but Recast doesn't support these. Please adjust the endpoints or customize the mesh tile size so that both points are inside one tile.");
-			Service.Log.Error($"Bounding box of matched tile: {config.bmin} <=> {config.bmax}");
-			throw new ArgumentException("Invalid inter-tile off-mesh connection");
-		}
-
-		if (!aInside && !bInside)
-			return;
-
-		Extend(ref config.offMeshConVerts, 6);
-		config.offMeshConVerts[^6] = ptA.X;
-		config.offMeshConVerts[^5] = ptA.Y;
-		config.offMeshConVerts[^4] = ptA.Z;
-		config.offMeshConVerts[^3] = ptB.X;
-		config.offMeshConVerts[^2] = ptB.Y;
-		config.offMeshConVerts[^1] = ptB.Z;
-
-		Extend(ref config.offMeshConDir, 1);
-		config.offMeshConDir[^1] = bidirectional ? DtNavMesh.DT_OFFMESH_CON_BIDIR : 0;
-
-		Extend(ref config.offMeshConFlags, 1);
-		config.offMeshConFlags[^1] = 1;
-
-		config.offMeshConCount++;
-
-		Extend(ref config.offMeshConRad, 1);
-		config.offMeshConRad[^1] = radius;
-
-		Extend(ref config.offMeshConAreas, 1);
-		config.offMeshConAreas[^1] = RcConstants.RC_WALKABLE_AREA;
-
-		Extend(ref config.offMeshConUserID, 1);
-		config.offMeshConUserID[^1] = userID;
-	}
-
-	private static void Extend<T>([NotNull] ref T[]? arr, int add)
-	{
-		arr ??= [];
-		Array.Resize(ref arr, arr.Length + add);
 	}
 }

@@ -4,9 +4,4 @@
 class Z1041BrayfloxsLongstop : NavmeshCustomization
 {
     public override int Version => 1;
-
-    public Z1041BrayfloxsLongstop()
-    {
-        Settings.Partitioning = DotRecast.Recast.RcPartition.MONOTONE;
-    }
 }

@@ -1,5 +1,4 @@
-﻿using DotRecast.Detour;
-using Navmesh.GroundGraph;
+﻿using Navmesh.GroundGraph;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -60,15 +59,6 @@ internal class Z1291Phaenna : NavmeshCustomization
 
 	const float pi = MathF.PI;
 	const float hpi = pi / 2;
-
-	public override void CustomizeSettings(DtNavMeshCreateParams config)
-	{
-	}
-
-	public override void CustomizeMesh(Navmesh mesh, List<uint> festivalLayers)
-	{
-		base.CustomizeMesh(mesh, festivalLayers);
-	}
 
 	public override void CustomizeGround(QuadGraph graph, List<uint> festivalLayers)
 	{

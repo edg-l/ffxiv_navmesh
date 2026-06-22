@@ -9,11 +9,4 @@
     <PackageReference Include="SharpDX.Mathematics" Version="4.2.0" />
     <Reference Include="Dalamud.Common" Private="false" />
   </ItemGroup>
-
-  <ItemGroup>
-    <ProjectReference Include="..\DotRecast\src\DotRecast.Core\DotRecast.Core.csproj" />
-    <ProjectReference Include="..\DotRecast\src\DotRecast.Detour\DotRecast.Detour.csproj" />
-    <ProjectReference Include="..\DotRecast\src\DotRecast.Detour.Extras\DotRecast.Detour.Extras.csproj" />
-    <ProjectReference Include="..\DotRecast\src\DotRecast.Recast\DotRecast.Recast.csproj" />
-  </ItemGroup>
 </Project>

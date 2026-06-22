@@ -1,15 +1,15 @@
-﻿using DotRecast.Core;
-using DotRecast.Recast;
-using Navmesh.NavVolume;
+﻿using Navmesh.NavVolume;
 using System;
 using System.Collections.Generic;
 using System.Numerics;
 
 namespace Navmesh;
 
-// utility to rasterize various meshes into a heightfield
+// utility to rasterize various meshes into a voxel volume
 public class NavmeshRasterizer
 {
+    private const int RC_WALKABLE_AREA = 1;
+
     // cheap triangle-bbox test: if all 3 vertices are on the same side of the bbox plane, the triangle can be discarded
     [Flags]
     private enum OutFlags : byte
@@ -98,10 +98,15 @@ public class NavmeshRasterizer
         }
     }
 
-    private RcHeightfield _heightfield;
-    private RcContext _telemetry;
     private Voxelizer? _voxelizer;
     private IntersectionSet? _iset;
+    private Vector3 _bmin;
+    private Vector3 _bmax;
+    private float _cs;
+    private float _ch;
+    private int _width;
+    private int _height;
+    private int _borderSize;
     private float _invCellXZ;
     private float _invCellY;
     private int _maxY;
@@ -112,23 +117,28 @@ public class NavmeshRasterizer
     private int _voxShiftY;
     private int _voxShiftZ;
 
-    public NavmeshRasterizer(RcHeightfield heightfield, float walkableNormalThreshold, int walkableMaxClimb, int minGap, bool fillInteriors, Voxelizer? voxelizer, RcContext telemetry)
+    public NavmeshRasterizer(Voxelizer? voxelizer, Vector3 boundsMin, Vector3 boundsMax, float cellSize, float cellHeight, int borderSize, float walkableNormalThreshold, int walkableMaxClimb, int minGap, bool fillInteriors)
     {
-        _heightfield = heightfield;
-        _telemetry = telemetry;
         _voxelizer = voxelizer;
-        _iset = fillInteriors ? new IntersectionSet(heightfield.width, heightfield.height) : null;
-        _invCellXZ = 1.0f / _heightfield.cs;
-        _invCellY = 1.0f / _heightfield.ch;
-        _maxY = (int)((_heightfield.bmax.Y - _heightfield.bmin.Y) * _invCellY);
+        _bmin = boundsMin;
+        _bmax = boundsMax;
+        _cs = cellSize;
+        _ch = cellHeight;
+        _borderSize = borderSize;
+        _width = (int)MathF.Ceiling((_bmax.X - _bmin.X) / _cs);
+        _height = (int)MathF.Ceiling((_bmax.Z - _bmin.Z) / _cs);
+        _iset = fillInteriors ? new IntersectionSet(_width, _height) : null;
+        _invCellXZ = 1.0f / _cs;
+        _invCellY = 1.0f / _ch;
+        _maxY = (int)((_bmax.Y - _bmin.Y) * _invCellY);
         _minSpanGap = minGap;
         _walkableClimbThreshold = walkableMaxClimb;
         _walkableNormalThreshold = walkableNormalThreshold;
         if (voxelizer != null)
         {
-            var dx = (heightfield.width - 2 * heightfield.borderSize) / voxelizer.NumX;
+            var dx = (_width - 2 * _borderSize) / voxelizer.NumX;
             var dy = _maxY / voxelizer.NumY;
-            var dz = (heightfield.height - 2 * heightfield.borderSize) / voxelizer.NumZ;
+            var dz = (_height - 2 * _borderSize) / voxelizer.NumZ;
             if (!BitOperations.IsPow2(dx) || !BitOperations.IsPow2(dy) || !BitOperations.IsPow2(dz))
                 throw new Exception($"Cell size mismatch: {dx}x{dy}x{dz}");
             _voxShiftX = BitOperations.Log2((uint)dx);
@@ -148,10 +158,10 @@ public class NavmeshRasterizer
             {
                 if (RasterizeMesh(mesh, instance, out var minY) && perMeshInteriors)
                 {
-                    int z0 = Math.Clamp((int)((instance.WorldBounds.Min.Z - _heightfield.bmin.Z) * _invCellXZ), 0, _heightfield.height - 1);
-                    int z1 = Math.Clamp((int)((instance.WorldBounds.Max.Z - _heightfield.bmin.Z) * _invCellXZ), 0, _heightfield.height - 1);
-                    int x0 = Math.Clamp((int)((instance.WorldBounds.Min.X - _heightfield.bmin.X) * _invCellXZ), 0, _heightfield.width - 1);
-                    int x1 = Math.Clamp((int)((instance.WorldBounds.Max.X - _heightfield.bmin.X) * _invCellXZ), 0, _heightfield.width - 1);
+                    int z0 = Math.Clamp((int)((instance.WorldBounds.Min.Z - _bmin.Z) * _invCellXZ), 0, _height - 1);
+                    int z1 = Math.Clamp((int)((instance.WorldBounds.Max.Z - _bmin.Z) * _invCellXZ), 0, _height - 1);
+                    int x0 = Math.Clamp((int)((instance.WorldBounds.Min.X - _bmin.X) * _invCellXZ), 0, _width - 1);
+                    int x1 = Math.Clamp((int)((instance.WorldBounds.Max.X - _bmin.X) * _invCellXZ), 0, _width - 1);
                     FillInterior(z0, z1, x0, x1, solidBelowNonManifold ? minY : _maxY);
                 }
             }
@@ -159,7 +169,7 @@ public class NavmeshRasterizer
 
         if (!perMeshInteriors)
         {
-            FillInterior(0, _heightfield.height - 1, 0, _heightfield.width - 1, solidBelowNonManifold ? 0 : _maxY);
+            FillInterior(0, _height - 1, 0, _width - 1, solidBelowNonManifold ? 0 : _maxY);
         }
     }
 
@@ -167,7 +177,7 @@ public class NavmeshRasterizer
     public bool RasterizeMesh(SceneExtractor.Mesh mesh, SceneExtractor.MeshInstance instance, out int minimalY)
     {
         minimalY = _maxY;
-        if (instance.WorldBounds.Max.X <= _heightfield.bmin.X || instance.WorldBounds.Max.Z <= _heightfield.bmin.Z || instance.WorldBounds.Min.X >= _heightfield.bmax.X || instance.WorldBounds.Min.Z >= _heightfield.bmax.Z)
+        if (instance.WorldBounds.Max.X <= _bmin.X || instance.WorldBounds.Max.Z <= _bmin.Z || instance.WorldBounds.Min.X >= _bmax.X || instance.WorldBounds.Min.Z >= _bmax.Z)
             return false;
 
         Span<Vector3> worldVertices = stackalloc Vector3[256];
@@ -201,7 +211,7 @@ public class NavmeshRasterizer
                     || normal.Y < _walkableNormalThreshold
                     // for flyable scenes, assume unlandable == unwalkable, unless explicitly set
                     || _voxelizer != null && flags.HasFlag(SceneExtractor.PrimitiveFlags.Unlandable) && !flags.HasFlag(SceneExtractor.PrimitiveFlags.ForceWalkable);
-                var areaId = unwalkable ? 0 : RcConstants.RC_WALKABLE_AREA;
+                var areaId = unwalkable ? 0 : RC_WALKABLE_AREA;
 
                 // prepare for clipping: while iterating over z, we'll keep the 'remaining polygon' in clipRemainingZ
                 int numRemainingZ = 0;
@@ -211,11 +221,11 @@ public class NavmeshRasterizer
 
                 // calculate the footprint of the triangle on the grid's z-axis
                 var (minZ, maxZ) = AxisMinMax(clipRemainingZ, numRemainingZ, 2);
-                int z0 = (int)((minZ - _heightfield.bmin.Z) * _invCellXZ); // TODO: not sure whether this is correct (round to 0 instead of floor...)
-                int z1 = (int)((maxZ - _heightfield.bmin.Z) * _invCellXZ);
+                int z0 = (int)((minZ - _bmin.Z) * _invCellXZ);
+                int z1 = (int)((maxZ - _bmin.Z) * _invCellXZ);
                 // note: no need to check for fully outside here, it was checked before
-                z0 = Math.Clamp(z0, -1, _heightfield.height - 1); // use -1 rather than 0 to cut the polygon properly at the start of the tile
-                z1 = Math.Clamp(z1, 0, _heightfield.height - 1);
+                z0 = Math.Clamp(z0, -1, _height - 1); // use -1 rather than 0 to cut the polygon properly at the start of the tile
+                z1 = Math.Clamp(z1, 0, _height - 1);
 
                 for (int z = z0; z <= z1; ++z)
                 {
@@ -223,7 +233,7 @@ public class NavmeshRasterizer
                         break;
 
                     // clip polygon to 'row'
-                    var cellZMax = _heightfield.bmin.Z + (z + 1) * _heightfield.cs;
+                    var cellZMax = _bmin.Z + (z + 1) * _cs;
                     int numRemainingX = SplitConvexPoly(clipRemainingZ, clipRemainingX, clipScratch, ref numRemainingZ, 2, cellZMax);
 
                     // previous buffer is now new scratch
@@ -236,21 +246,21 @@ public class NavmeshRasterizer
 
                     // find x bounds of the row
                     var (minX, maxX) = AxisMinMax(clipRemainingX, numRemainingX, 0);
-                    int x0 = (int)((minX - _heightfield.bmin.X) * _invCellXZ); // TODO: not sure whether this is correct (round to 0 instead of floor...)
-                    int x1 = (int)((maxX - _heightfield.bmin.X) * _invCellXZ);
-                    if (x1 < 0 || x0 >= _heightfield.width)
+                    int x0 = (int)((minX - _bmin.X) * _invCellXZ);
+                    int x1 = (int)((maxX - _bmin.X) * _invCellXZ);
+                    if (x1 < 0 || x0 >= _width)
                         continue;
-                    x0 = Math.Clamp(x0, -1, _heightfield.width - 1);
-                    x1 = Math.Clamp(x1, 0, _heightfield.width - 1);
+                    x0 = Math.Clamp(x0, -1, _width - 1);
+                    x1 = Math.Clamp(x1, 0, _width - 1);
 
-                    var cellZMid = _heightfield.bmin.Z + (z + 0.5f) * _heightfield.cs;
+                    var cellZMid = _bmin.Z + (z + 0.5f) * _cs;
                     for (int x = x0; x <= x1; ++x)
                     {
                         if (numRemainingX < 3)
                             break;
 
                         // clip polygon to 'column'
-                        var cellXMax = _heightfield.bmin.X + (x + 1) * _heightfield.cs;
+                        var cellXMax = _bmin.X + (x + 1) * _cs;
                         int numCell = SplitConvexPoly(clipRemainingX, clipCell, clipScratch, ref numRemainingX, 0, cellXMax);
 
                         // previous buffer is now new scratch
@@ -261,10 +271,10 @@ public class NavmeshRasterizer
                         if (numCell < 3 || x < 0)
                             continue;
 
-                        // find y bounds of the cell (TODO: this can probably be slightly simplified)
+                        // find y bounds of the cell
                         var (minY, maxY) = AxisMinMax(clipCell, numCell, 1);
-                        int y0 = (int)MathF.Floor((minY - _heightfield.bmin.Y) * _invCellY);
-                        int y1 = (int)MathF.Ceiling((maxY - _heightfield.bmin.Y) * _invCellY);
+                        int y0 = (int)MathF.Floor((minY - _bmin.Y) * _invCellY);
+                        int y1 = (int)MathF.Ceiling((maxY - _bmin.Y) * _invCellY);
                         if (y1 < 0 || y0 >= _maxY)
                             continue;
                         y0 = Math.Clamp(y0, 0, _maxY - 1);
@@ -287,7 +297,7 @@ public class NavmeshRasterizer
                             //  ==> b = (APx*ACz - APz*ACx) / (ACz*ABx - ACx*ABz)
                             //  ==> y = Ay + ABy*b + ACy*c
                             // note that (ACz*ABx - ACx*ABz) == (AC cross AB).y
-                            var cellXMid = _heightfield.bmin.X + (x + 0.5f) * _heightfield.cs;
+                            var cellXMid = _bmin.X + (x + 0.5f) * _cs;
                             var apx = cellXMid - v1.X;
                             var apz = cellZMid - v1.Z;
                             var c = (apz * v12.X - apx * v12.Z) * invDiv;
@@ -309,76 +319,25 @@ public class NavmeshRasterizer
         return true;
     }
 
-    private void AddSpan(int x, int z, int y0, int y1, int areaId, bool includeInVolume, bool mergeBelow = true)
+    private void AddSpan(int x, int z, int y0, int y1, int areaId, bool includeInVolume)
     {
-        var yOrig = (y0, y1);
-        ref var cellHead = ref _heightfield.spans[z * _heightfield.width + x];
-
-        // find insert position for new span: skip any existing spans that end before new span start
-        var prevMaxY = mergeBelow ? y0 - _minSpanGap - 1 : y1; // any spans that have smax >= prevMaxY are merged
-        var nextMinY = y1 + _minSpanGap + 1; // any spans that have smin <= nextMinY are merged
-        uint prevSpanIndex = 0;
-        uint currSpanIndex = cellHead;
-        while (currSpanIndex != 0)
-        {
-            ref var currSpan = ref _heightfield.Span(currSpanIndex);
-            if (currSpan.smin > nextMinY)
-            {
-                // new span should be inserted before current one
-                break;
-            }
-
-            if (currSpan.smax < prevMaxY)
-            {
-                // new span is fully above current one - continue...
-                prevSpanIndex = currSpanIndex;
-                currSpanIndex = currSpan.next;
-                continue;
-            }
-
-            // new span overlaps current one - merge and remove old one
-            // the trickiest part is how to merge area ids
-            // idea is: if one of the spans is significantly 'above', take area from it; if they are of similar height, take higher area value (assuming it's more permissive)
-            var heightDiff = currSpan.smax - y1;
-            if (heightDiff > _walkableClimbThreshold || heightDiff >= -_walkableClimbThreshold && currSpan.area > areaId)
-                areaId = currSpan.area;
-            y0 = mergeBelow ? Math.Min(y0, currSpan.smin) : Math.Max(y0, currSpan.smax);
-            y1 = Math.Max(y1, currSpan.smax);
-
-            // free merged span; note that prev would still point to it, we'll fix it later
-            var nextSpanIndex = currSpan.next;
-            _heightfield.spanPool.Free(currSpanIndex);
-            currSpanIndex = nextSpanIndex;
-        }
-
-        // insert new span
-        var newSpanIndex = _heightfield.spanPool.Alloc();
-        _heightfield.Span(newSpanIndex) = new() { smin = y0, smax = y1, area = areaId, next = currSpanIndex };
-        if (prevSpanIndex == 0)
-            cellHead = newSpanIndex;
-        else
-            _heightfield.Span(prevSpanIndex).next = newSpanIndex;
-
-        // mark overlapping voxels as solid; use unmodified y coords since it's possible for a realSolid span to be merged with a fly-through span
-        // TODO: figure out if we can preserve flythrough-ability using areaId - not sure if nonzero area id always indicates a walkable surface, recast docs are very unclear on this front
         if (includeInVolume && _voxelizer != null)
         {
-            x -= _heightfield.borderSize;
-            z -= _heightfield.borderSize;
-            if (x >= 0 && z >= 0)
+            var bx = x - _borderSize;
+            var bz = z - _borderSize;
+            if (bx >= 0 && bz >= 0)
             {
-                x >>= _voxShiftX;
-                z >>= _voxShiftZ;
-                if (x < _voxelizer.NumX && z < _voxelizer.NumZ)
+                bx >>= _voxShiftX;
+                bz >>= _voxShiftZ;
+                if (bx < _voxelizer.NumX && bz < _voxelizer.NumZ)
                 {
                     // block pixels beneath the span for a distance roughly equal to agent height, otherwise volume pathfind will try to move the player through doorframes etc
-                    _voxelizer.AddSpan(x, z, (yOrig.y0 - _minSpanGap) >> _voxShiftY, yOrig.y1 >> _voxShiftY);
+                    _voxelizer.AddSpan(bx, bz, (y0 - _minSpanGap) >> _voxShiftY, y1 >> _voxShiftY);
                 }
             }
         }
     }
 
-    // TODO: maintain non-empty cells in intersection set?
     private void FillInterior(int z0, int z1, int x0, int x1, int yBelowNonManifold)
     {
         if (_iset == null)
@@ -395,17 +354,13 @@ public class NavmeshRasterizer
                 if (cnt == 0)
                     continue; // empty
 
-                //if (x == 521 && z == 0)
-                //    for (int i = 0; i < cnt; ++i)
-                //        Service.Log.Info($"{name}.{ii} {haveNegNormal} [{i}]: {solidSort[i]:X} {solidVoxel[i]}");
-
                 int idx = 0;
                 if (solidVoxel[idx] > yBelowNonManifold)
                 {
                     // non-manifold mesh, assume everything below is interior
                     while (idx + 1 < cnt && solidVoxel[idx + 1] > yBelowNonManifold)
                         ++idx; // well i dunno, some terrain (eg south thanalan) is really _that_ fucked
-                    AddSpan(x, z, yBelowNonManifold, solidVoxel[idx], 0, true, false);
+                    AddSpan(x, z, yBelowNonManifold, solidVoxel[idx], 0, true);
                     ++idx;
                 }
 
@@ -429,66 +384,6 @@ public class NavmeshRasterizer
         _iset.Clear();
     }
 
-    // TODO: remove after i'm confident in my replacement code
-    public void RasterizeOld(SceneExtractor geom, SceneExtractor.MeshType types)
-    {
-        float[] vertices = new float[3 * 256];
-        foreach (var (name, mesh) in geom.Meshes)
-        {
-            if ((mesh.MeshType & types) == SceneExtractor.MeshType.None)
-                continue;
-
-            foreach (var inst in mesh.Instances)
-            {
-                if (inst.WorldBounds.Max.X <= _heightfield.bmin.X || inst.WorldBounds.Max.Z <= _heightfield.bmin.Z || inst.WorldBounds.Min.X >= _heightfield.bmax.X || inst.WorldBounds.Min.Z >= _heightfield.bmax.Z)
-                    continue;
-
-                foreach (var part in mesh.Parts)
-                {
-                    // fill vertex buffer
-                    int iv = 0;
-                    foreach (var v in part.Vertices)
-                    {
-                        var w = inst.WorldTransform.TransformCoordinate(v);
-                        vertices[iv++] = w.X;
-                        vertices[iv++] = w.Y;
-                        vertices[iv++] = w.Z;
-                    }
-
-                    // TODO: move area-id calculations to extraction step + store indices in a form that allows using RasterizeTriangles()
-                    foreach (var p in part.Primitives)
-                    {
-                        var flags = (p.Flags & ~inst.ForceClearPrimFlags) | inst.ForceSetPrimFlags;
-                        if (_voxelizer != null && flags.HasFlag(SceneExtractor.PrimitiveFlags.FlyThrough))
-                            continue; // TODO: rasterize to normal heightfield, can't do it right now, since we're using same heightfield for both mesh and volume
-
-                        bool unwalkable = flags.HasFlag(SceneExtractor.PrimitiveFlags.ForceUnwalkable);
-                        unwalkable |= _voxelizer != null && flags.HasFlag(SceneExtractor.PrimitiveFlags.Unlandable); // for flyable scenes, assume unlandable == unwalkable
-                        if (!unwalkable)
-                        {
-                            var v1 = CachedVertex(vertices, p.V1);
-                            var v2 = CachedVertex(vertices, p.V2);
-                            var v3 = CachedVertex(vertices, p.V3);
-                            var v12 = v2 - v1;
-                            var v13 = v3 - v1;
-                            var normal = Vector3.Normalize(Vector3.Cross(v12, v13));
-                            unwalkable = normal.Y < _walkableNormalThreshold;
-                        }
-
-                        var areaId = unwalkable ? 0 : RcConstants.RC_WALKABLE_AREA;
-                        RcRasterizations.RasterizeTriangle(_telemetry, vertices, p.V1, p.V2, p.V3, areaId, _heightfield, _walkableClimbThreshold);
-                    }
-                }
-            }
-        }
-    }
-
-    private static Vector3 CachedVertex(ReadOnlySpan<float> vertices, int i)
-    {
-        var offset = 3 * i;
-        return new(vertices[offset], vertices[offset + 1], vertices[offset + 2]);
-    }
-
     private void TransformVertices(SceneExtractor.MeshInstance instance, List<Vector3> localVertices, Span<Vector3> outWorld, Span<OutFlags> outFlags)
     {
         int iv = 0;
@@ -496,12 +391,12 @@ public class NavmeshRasterizer
         {
             var w = instance.WorldTransform.TransformCoordinate(v);
             var f = OutFlags.None;
-            if (w.X <= _heightfield.bmin.X) f |= OutFlags.NegX;
-            if (w.X >= _heightfield.bmax.X) f |= OutFlags.PosX;
-            if (w.Y <= _heightfield.bmin.Y) f |= OutFlags.NegY;
-            if (w.Y >= _heightfield.bmax.Y) f |= OutFlags.PosY;
-            if (w.Z <= _heightfield.bmin.Z) f |= OutFlags.NegZ;
-            if (w.Z >= _heightfield.bmax.Z) f |= OutFlags.PosZ;
+            if (w.X <= _bmin.X) f |= OutFlags.NegX;
+            if (w.X >= _bmax.X) f |= OutFlags.PosX;
+            if (w.Y <= _bmin.Y) f |= OutFlags.NegY;
+            if (w.Y >= _bmax.Y) f |= OutFlags.PosY;
+            if (w.Z <= _bmin.Z) f |= OutFlags.NegZ;
+            if (w.Z >= _bmax.Z) f |= OutFlags.PosZ;
             outWorld[iv] = w;
             outFlags[iv] = f;
             ++iv;

@@ -1,4 +1,5 @@
 ﻿using Dalamud.Bindings.ImGui;
+using Navmesh.GroundGraph;
 using Navmesh.Movement;
 using Navmesh.NavVolume;
 using System;
@@ -17,9 +18,8 @@ class DebugNavmeshManager : IDisposable
 	private DebugGameCollision _coll;
 	private Vector3 _target;
 
-	private DebugDetourNavmesh? _drawNavmesh;
+	private DebugQuadGraph? _drawGround;
 	private DebugVoxelMap? _debugVoxelMap;
-	private DebugLinks? _debugLinks;
 
 	public DebugNavmeshManager(DebugDrawer dd, DebugGameCollision coll, NavmeshManager manager, FollowPath path, AsyncMoveRequest move, DTRProvider dtr)
 	{
@@ -35,7 +35,7 @@ class DebugNavmeshManager : IDisposable
 	public void Dispose()
 	{
 		_manager.OnNavmeshChanged -= OnNavmeshChanged;
-		_drawNavmesh?.Dispose();
+		_drawGround?.Dispose();
 		_debugVoxelMap?.Dispose();
 	}
 
@@ -93,22 +93,21 @@ class DebugNavmeshManager : IDisposable
 		DrawPosition("Flag", MapUtils.FlagToPoint(_manager.Query) ?? default);
 		DrawPosition("Floor", _manager.Query.FindPointOnFloor(playerPos) ?? default);
 
-		_drawNavmesh ??= new(_manager.Navmesh.Mesh, _manager.Query.MeshQuery, _manager.Query.LastPath, _tree, _dd);
-		_drawNavmesh.Draw();
+		if (_manager.Navmesh.Ground != null)
+		{
+			_drawGround ??= new(_manager.Navmesh.Ground, _tree, _dd);
+			_drawGround.Draw();
+		}
 		if (_manager.Navmesh.Volume != null)
 		{
 			_debugVoxelMap ??= new(_manager.Navmesh.Volume, _manager.Query.VolumeQuery, _tree, _dd);
 			_debugVoxelMap.Draw();
 		}
-
-		_debugLinks ??= new(_manager.Navmesh, _dd);
-		_debugLinks.Draw();
 	}
 
 	private void DrawPosition(string tag, Vector3 position)
 	{
-		_manager.Navmesh!.Mesh.CalcTileLoc(position.SystemToRecast(), out var tileX, out var tileZ);
-		_tree.LeafNode($"{tag} position: {position:f3}, tile: {tileX}x{tileZ}, poly: {_manager.Query!.FindNearestMeshPoly(position):X}");
+		_tree.LeafNode($"{tag} position: {position:f3}, quad: {_manager.Query!.FindNearestMeshPoly(position):X}");
 		var voxel = _manager.Query.FindNearestVolumeVoxel(position);
 		if (_tree.LeafNode($"{tag} voxel: {voxel:X}###{tag}voxel").SelectedOrHovered && voxel != VoxelMap.InvalidVoxel)
 			_debugVoxelMap?.VisualizeVoxel(voxel);
@@ -121,8 +120,8 @@ class DebugNavmeshManager : IDisposable
 
 	private void OnNavmeshChanged(Navmesh? navmesh, NavmeshQuery? query)
 	{
-		_drawNavmesh?.Dispose();
-		_drawNavmesh = null;
+		_drawGround?.Dispose();
+		_drawGround = null;
 		_debugVoxelMap?.Dispose();
 		_debugVoxelMap = null;
 	}

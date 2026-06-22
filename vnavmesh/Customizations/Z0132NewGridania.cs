@@ -1,5 +1,4 @@
-﻿using DotRecast.Detour;
-using Navmesh.GroundGraph;
+﻿using Navmesh.GroundGraph;
 using System.Collections.Generic;
 
 namespace Navmesh.Customizations;
@@ -14,15 +13,6 @@ internal class Z0132NewGridania : NavmeshCustomization
 		if (scene.Meshes.TryGetValue("bg/ffxiv/fst_f1/twn/common/collision/f1t0_a0_plnt1.pcb", out var mesh))
 			foreach (var inst in mesh.Instances)
 				inst.WorldTransform.M22 *= 2;
-	}
-
-	public override void CustomizeSettings(DtNavMeshCreateParams config)
-	{
-	}
-
-	public override void CustomizeMesh(Navmesh mesh, List<uint> festivalLayers)
-	{
-		base.CustomizeMesh(mesh, festivalLayers);
 	}
 
 	public override void CustomizeGround(QuadGraph graph, List<uint> festivalLayers)

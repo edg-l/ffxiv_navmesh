@@ -10,9 +10,4 @@ class Z0363TheLostCityofAmdapor : NavmeshCustomization
         //remove entire mesh and all instances
         scene.Meshes.Remove("bg/ffxiv/fst_f1/dun/f1d5/collision/f1d5_a2_door2.pcb");
     }
-
-    public Z0363TheLostCityofAmdapor()
-    {
-        Settings.Partitioning = DotRecast.Recast.RcPartition.MONOTONE;
-    }
 }

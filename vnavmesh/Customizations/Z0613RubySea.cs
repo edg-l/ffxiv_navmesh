@@ -8,11 +8,6 @@ internal class Z0613RubySea : NavmeshCustomization
 {
 	public override int Version => 1;
 
-	public override void CustomizeMesh(Navmesh mesh, List<uint> festivalLayers)
-	{
-		base.CustomizeMesh(mesh, festivalLayers);
-	}
-
 	public override void CustomizeGround(QuadGraph graph, List<uint> festivalLayers)
 	{
 		// the tunnel into the island containing tamamizu has some floor that is unlandable
