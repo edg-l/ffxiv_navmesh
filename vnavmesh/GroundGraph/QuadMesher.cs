@@ -86,12 +86,35 @@ public static class QuadMesher
             {
                 var (cx, cy, cz) = ld.IndexToVoxel((ushort)i);
                 var worldPos = tile.VoxelToWorld(cx, cy, cz);
-                var belowPos = worldPos - new Vector3(0, ld.CellSize.Y, 0);
-                var belowVoxel = volume.FindLeafVoxel(belowPos);
-                if (!belowVoxel.empty)
+                var regionMin = worldPos - ld.CellSize * 0.5f;
+                var regionMax = worldPos + ld.CellSize * 0.5f;
+                var xStart = (int)((regionMin.X - origin.X) / leafCellSize.X);
+                var xEnd = (int)((regionMax.X - origin.X) / leafCellSize.X);
+                var zStart = (int)((regionMin.Z - origin.Z) / leafCellSize.Z);
+                var zEnd = (int)((regionMax.Z - origin.Z) / leafCellSize.Z);
+
+                for (int lz = zStart; lz < zEnd; ++lz)
                 {
-                    var solidTopY = belowPos.Y + ld.CellSize.Y * 0.5f;
-                    MarkWalkableRegion(worldPos, ld.CellSize, origin, leafCellSize, totalCellsX, totalCellsZ, surfaceY, walkable, solidTopY);
+                    for (int lx = xStart; lx < xEnd; ++lx)
+                    {
+                        if (lx < 0 || lx >= totalCellsX || lz < 0 || lz >= totalCellsZ)
+                            continue;
+                        var leafWorld = origin + new Vector3((lx + 0.5f) * leafCellSize.X, worldPos.Y, (lz + 0.5f) * leafCellSize.Z);
+                        var aboveVoxel = volume.FindLeafVoxel(leafWorld);
+                        if (!aboveVoxel.empty)
+                            continue;
+                        var belowPos = leafWorld - new Vector3(0, leafCellSize.Y, 0);
+                        var belowVoxel = volume.FindLeafVoxel(belowPos);
+                        if (belowVoxel.empty)
+                            continue;
+                        var idx = lz * totalCellsX + lx;
+                        var solidTopY = belowPos.Y + leafCellSize.Y * 0.5f;
+                        if (!walkable[idx] || solidTopY > surfaceY[idx])
+                        {
+                            walkable[idx] = true;
+                            surfaceY[idx] = solidTopY;
+                        }
+                    }
                 }
                 continue;
             }
@@ -107,29 +130,6 @@ public static class QuadMesher
             else
             {
                 ScanTile(tile.Subdivision[subIdx], volume, origin, leafCellSize, totalCellsX, totalCellsZ, visited, surfaceY, walkable);
-            }
-        }
-    }
-
-    private static void MarkWalkableRegion(Vector3 worldPos, Vector3 cellSize, Vector3 origin, Vector3 leafCellSize, int totalCellsX, int totalCellsZ, float[] surfaceY, bool[] walkable, float solidTopY)
-    {
-        var xStart = (int)((worldPos.X - cellSize.X * 0.5f - origin.X) / leafCellSize.X);
-        var xEnd = (int)((worldPos.X + cellSize.X * 0.5f - origin.X) / leafCellSize.X);
-        var zStart = (int)((worldPos.Z - cellSize.Z * 0.5f - origin.Z) / leafCellSize.Z);
-        var zEnd = (int)((worldPos.Z + cellSize.Z * 0.5f - origin.Z) / leafCellSize.Z);
-
-        for (int z = zStart; z < zEnd; ++z)
-        {
-            for (int x = xStart; x < xEnd; ++x)
-            {
-                if (x < 0 || x >= totalCellsX || z < 0 || z >= totalCellsZ)
-                    continue;
-                var idx = z * totalCellsX + x;
-                if (!walkable[idx] || solidTopY > surfaceY[idx])
-                {
-                    walkable[idx] = true;
-                    surfaceY[idx] = solidTopY;
-                }
             }
         }
     }
