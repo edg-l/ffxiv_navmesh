@@ -84,106 +84,137 @@ IPC safety: `Path.ListWaypoints` still returns `List<Vector3>` of positions — 
 - The LoS-based string-pull stops at the last voxel before LoS breaks, not at the optimal face-crossing point. Produces slightly more waypoints than an ideal projection-funnel but hits the 5-10x reduction target. A tighter funnel can be a follow-up if in-game testing shows it's needed.
 - `Simplify` calls `VoxelSearch.LineOfSight` which calls `EnumerateVoxelsInLine(...).All(v => v.empty)` — each LoS probe walks the voxel grid along the line. For very long paths with many probes, this is O(probes * voxels_per_line). If profiling shows this is hot, consider caching LoS results per (anchor, probe) pair or switching to the projection-funnel. Not a concern until measured.
 
-## Phase 2 — DotRecast submodule rebase (BLOCKED, needs user decision)
+## Phase 2 — DotRecast submodule rebase (ABORTED, upstream divergence too large)
 
-Status: STOPPED. Submodule restored to original pointer `8002b30`. No changes
-committed for Phase 2. Phases 0 and 1 are committed and intact.
+Status: ABORTED. Submodule restored to original pointer `8002b30`. Plugin
+reverted to pre-Phase-2 state. Phases 0 and 1 remain committed and intact.
 
-### What blocked
+### What was attempted
 
-The plan assumed the fork's only meaningful Detour change was `abff290` (early
-exit), and that the rest of the fork's Detour work was droppable WIP. Wrong.
-The plugin's call site at `NavmeshQuery.cs:96`:
+User chose option B (port the fork's FindPath to upstream). I created a
+`rebase-to-upstream` branch off `upstream/main` and added adapter overloads
+to `DtNavMeshQuery.cs`:
+- `FindPath(..., ref List<long>, DtFindPathOption)` — wraps a new internal
+  `FindPath(..., IDtQueryHeuristic, int options, float raycastLimit, Span<long>, ...)`
+  that uses `heuristic.GetCost()` instead of the hardcoded
+  `RcVec3f.Distance(...) * H_SCALE`, with the early-exit on negative heuristic
+  (single `if`, no double-if bug).
+- `FindStraightPath(..., List<long>, ref List<DtStraightPath>, int, int)` —
+  wraps the upstream `Span`-based version.
+- `QueryPolygons(..., Action<DtMeshTile, DtPoly, long>)` — wraps the upstream
+  `long[]`-based version for the plugin's `IntersectQuery` callback.
 
-```csharp
-MeshQuery.FindPath(startRef, endRef, from.SystemToRecast(), to.SystemToRecast(),
-    _pathFilter, ref _lastPath, opt);
-```
+These compiled cleanly in `DotRecast.Detour.csproj` (0 errors, 10 warnings —
+all pre-existing CA2265 span-null comparisons in upstream code).
 
-uses a fork-specific overload `FindPath(..., ref List<long> path, DtFindPathOption fpo)`
-that does NOT exist in upstream `ikpil/DotRecast`. Upstream's signature is:
+### Why it was aborted
 
-```csharp
-FindPath(long startRef, long endRef, RcVec3f startPos, RcVec3f endPos,
-    IDtQueryFilter filter, Span<long> path, out int pathCount, int maxPath)
-```
+Building the full plugin revealed **220 errors** across 22 plugin files. The
+fork's divergence from upstream spans the ENTIRE Recast/Detour API surface,
+not just `FindPath`. The plugin depends on fork-specific:
 
-The fork's overload was built up across MULTIPLE fork commits, not just
-`abff290`:
-- `de3af0fc` "Experiment: always use edge intersection point for pathfinding"
-- `abff2907` "add early exit support to pathfind"
-- `60843e71` "WIP long distance portals"
-- `4b20f884` "fix raycast shortcut endpoint bug (again?)"
+Detour APIs (missing or renamed in upstream):
+- `DtMeshTile.polyLinks` (fork) vs `DtPoly.firstLink` (upstream) — 10 call sites
+- `DtNavMesh.AllocLink`, `DT_NULL_LINK`, `DT_POLY_BITS`, `DT_NAVMESH_MAGIC`,
+  `DT_NAVMESH_VERSION`, `DT_OFFMESH_CON_BIDIR`, `DecodePolyIdSalt`,
+  `EncodePolyId` — all removed/renamed in upstream
+- `DtNavMesh(params)` 2-arg constructor — upstream has different ctor signature
+- `DtNavMesh.AddTile(...)` without `out long result` — upstream requires it
+- `DtNavMesh.GetTileCount()` — removed in upstream
+- `RcBuilderResult.tileX`/`tileZ` — renamed in upstream
+- `RcVec3i[int]` setter — upstream's indexer is read-only
+- `JumpLinkBuilder`, `JumpLink`, `JumpLinkBuilderConfig`, `JumpLinkType` —
+  entire jump-link subsystem removed from upstream Recast
 
-All four touch `DtNavMeshQuery.cs` and together define the
-`FindPath(..., DtFindPathOption)` overload + the `IDtQueryHeuristic`
-plumbing + `GetEdgeIntersectionPoint` usage + the `GoalRadiusHeuristic`
-support that the plugin's `NavmeshQuery.GoalRadiusHeuristic` depends on.
+Recast APIs (missing or renamed in upstream):
+- `RcConstants` — removed; constants inlined or moved
+- `RcCommons` — removed
+- `RcVecUtils` — removed
+- `RcSpan` (fork: class with implicit int conversion for pooling) vs upstream
+  `RcSpan` (different shape after upstream's own pooling rework)
+- `RcHeightfield.Span`, `RcHeightfield.spanPool` — fork's span-pooling API;
+  upstream uses `RcSpanPool` + `AllocSpan`/`FreeSpan`
 
-Upstream DOES have `DtFindPathOption`, `IDtQueryHeuristic`,
-`DtDefaultQueryHeuristic` structs/classes — but not the `FindPath` overload
-that takes them. Upstream's `FindPath` uses `Span<long>` + `out int pathCount`
-+ `int maxPath`, not `ref List<long>` + `DtFindPathOption`.
+The 220 errors break down as:
+- ~80 in `Debug/` files (debug visualization, uses RcConstants/RcCommons/RcSpan heavily)
+- ~30 in `NavmeshBuilder.cs` (jump links, RcVecUtils, RcBuilderResult)
+- ~25 in `NavmeshRasterizer.cs` (RcSpan/RcHeightfield.Span/spanPool — the
+  fork's span pooling that the plan said to drop, but the plugin's
+  RASTERIZER directly accesses the internal span data structure)
+- ~20 in `NavmeshCustomization.cs` (polyLinks, AllocLink, DT_NULL_LINK,
+  DecodePolyIdSalt, EncodePolyId, DT_OFFMESH_CON_BIDIR)
+- ~15 in `Navmesh.cs` (DtNavMesh ctor, AddTile, GetTileCount, DT_NAVMESH_MAGIC/
+  VERSION, RcVec3i readonly)
+- ~10 in `NavmeshQuery.cs` (polyLinks, DT_NULL_LINK)
 
-Additionally, the plan's other keep-patch `91880dd` (span pooling) is
-REDUNDANT: upstream added `RcSpanPool` + `AllocSpan/FreeSpan` API in April 2024
-(commits `6b2bd27b` and `f49f9eb5`), two months after the fork's March 2024
-attempt. Drop `91880dd` entirely — upstream's version is canonical.
+### Root cause
 
-### What a clean rebase actually requires
+The `xanunderscore/DotRecast` fork was not a thin patch on upstream — it was
+a significant API refactoring: it renamed/moved constants (`RcConstants`,
+`RcCommons`, `RcVecUtils`), restructured `RcSpan`/`RcHeightfield` for pooling
+(the plugin's `NavmeshRasterizer.cs` accesses the pooled span internals
+directly), changed `DtMeshTile` link storage (`polyLinks` vs `firstLink`),
+reworked `DtNavMesh` construction and serialization, and removed the
+`JumpLinkBuilder` subsystem. The plugin was written against the fork's API
+shapes, not upstream's.
 
-This is NOT a 2-patch cherry-pick. It requires:
-1. Port the fork's `FindPath(..., ref List<long>, DtFindPathOption)` overload
-   onto upstream's current `DtNavMeshQuery.cs`, reconciling with upstream's
-   `Span<long>`-based API. This means writing a new overload that wraps or
-   replaces upstream's signature, and porting the `IDtQueryHeuristic` call
-   site (the `heuristic.GetCost(neighbourPos, endPos)` line) into the
-   upstream loop structure.
-2. Port the `GetEdgeIntersectionPoint` usage from `de3af0fc` (the fork uses
-   it unconditionally; upstream uses `GetEdgeMidPoint`).
-3. Port the early-exit `goto break_outer` from `abff290`, fixing the
-   double-`if` bug, into the upstream loop structure.
-4. Decide whether to keep `60843e71` (WIP long distance portals) and
-   `4b20f884` (raycast shortcut endpoint fix) — these are WIP but the
-   plugin may depend on their behavior. Need to check if removing them
-   breaks the plugin's `useRaycast` path.
-5. Re-verify the plugin's `GoalRadiusHeuristic` (in `NavmeshQuery.cs`)
-   still works — it relies on the `IDtQueryHeuristic.GetCost` returning -1
-   for the early-exit trigger, which is fork-specific behavior.
+### What a real migration would require
 
-This is a substantial porting effort, not a cherry-pick. The plan's
-threshold (">10 call sites need rewriting -> STOP and surface") is exceeded
-in spirit: it's not 10 call sites, but it's one core API rewrite that
-cascades into behavioral questions about 4 fork commits.
+This is a full plugin port from the fork's Recast/Detour API to upstream's,
+across 22 files and 220 call sites. Key work items:
+1. Rewrite `NavmeshRasterizer.cs` to use upstream's `RcSpanPool`/`AllocSpan`/
+   `FreeSpan` instead of the fork's `RcHeightfield.Span`/`spanPool` direct
+   access. This is the hardest part — the rasterizer directly walks the span
+   linked list.
+2. Port `NavmeshBuilder.cs` jump-link logic or remove it (upstream removed
+   `JumpLinkBuilder` entirely; the fork's jump links were WIP anyway per the
+   TODO file).
+3. Replace all `polyLinks[poly.index]` with `poly.firstLink` (10 sites).
+4. Replace all `RcConstants`/`RcCommons`/`RcVecUtils` with upstream equivalents
+   (~30 sites). Need to find where the constants moved to.
+5. Adapt `Navmesh.cs` serialization to upstream's `DtNavMesh` ctor and
+   `AddTile` signature, plus find where `DT_NAVMESH_MAGIC`/`VERSION` moved.
+6. Rewrite `NavmeshCustomization.cs` link manipulation to use upstream's
+   `DtNavMesh` link API (no `AllocLink`, no `DecodePolyIdSalt`/`EncodePolyId`).
+7. Rewrite all `Debug/*.cs` files for upstream's Recast struct shapes.
 
-### Decision needed from user
+This is estimated at 2-4 hours of focused porting work, not a cherry-pick or
+adapter-layer job. The adapter-overload approach I started (adding `FindPath`
++ `FindStraightPath` + `QueryPolygons` overloads) addressed the query-side
+API but not the build-side or rasterizer-side APIs, which need source-level
+porting.
 
-Options:
-A. **Abort Phase 2 entirely.** Keep the stale fork submodule as-is. Phases
-   0 and 1 are done and valuable on their own. The DotRecast fork works;
-   it's just stale. Document this as a known limitation.
-B. **Port the fork's FindPath overload to upstream.** Substantial work:
-   write a new overload on upstream's `DtNavMeshQuery.cs` that takes
-   `DtFindPathOption` + `ref List<long>`, port the `IDtQueryHeuristic`
-   call site, port the early-exit (fixing the double-if), decide on the
-   WIP commits. Then bump the submodule pointer. This is a real
-   feature-port, not a rebase.
-C. **Adapt the plugin to upstream's API.** Change `NavmeshQuery.cs:96` to
-   call upstream's `FindPath(..., Span<long>, out int, int)` instead of
-   the fork's overload. Lose the `DtFindPathOption` / `GoalRadiusHeuristic`
-   / early-exit behavior. This means the plugin's `range > 0` pathfinding
-   (used by `Nav.PathfindWithTolerance`) degrades to no-early-exit.
-   Simpler but a behavior regression.
+### Decision
 
-Recommend A (abort) or B (port) over C (regress). A is the lowest risk;
-B is the highest value. C loses a feature the plugin actively uses.
+Phase 2 is abandoned. The fork submodule stays at `8002b30` (the original
+`xanunderscore/DotRecast` fork). Phases 0 and 1 (the volume-layer improvements)
+are complete and valuable on their own; they don't depend on the DotRecast
+version because they only touch the plugin's own `NavVolume/` code.
 
-### Fork submodule state (unchanged)
+The DotRecast fork is stale (304 commits behind upstream) but functional.
+A future migration to upstream is possible but requires a dedicated porting
+effort, not a rebase. Document this as a known limitation in the fork's
+README and SESSION_NOTES.
+
+### Fork submodule state (unchanged, clean)
 
 - Pointer: `8002b30b9f196bcd9eb0a898e51abcea4177fb04` (original)
-- Branch: detached HEAD at the fork's tip
-- No branches created, no cherry-picks applied, no pushes.
-- To resume Phase 2 from a clean state, the submodule is ready as-is.
+- HEAD: detached at `8002b30b`
+- No branches created (the temporary `rebase-to-upstream` was deleted)
+- No cherry-picks applied, no stashes, no pushes
+- Plugin working tree: clean (reverted to Phase 1 state)
+
+### If a future session wants to retry Phase 2
+
+Read this section first. The adapter-overload approach for the query side
+(`FindPath`/`FindStraightPath`/`QueryPolygons`) is viable and was prototyped
+(see the stashed diff if still in reflog, or re-derive from the description
+above). But the build-side and rasterizer-side APIs (`RcSpan`, `RcHeightfield`,
+`RcConstants`, `polyLinks`, `JumpLinkBuilder`, `DtNavMesh` ctor) require
+source-level porting of `NavmeshRasterizer.cs`, `NavmeshBuilder.cs`,
+`NavmeshCustomization.cs`, `Navmesh.cs`, and all `Debug/*.cs` files. Budget
+2-4 hours minimum, and expect to make tradeoff decisions about jump links
+(upstream removed them; the fork's were WIP).
 
 ## Decisions log
 
