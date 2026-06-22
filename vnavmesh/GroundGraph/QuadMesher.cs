@@ -67,7 +67,7 @@ public static class QuadMesher
             }
         }
 
-        Service.Log.Debug($"[ground] quad graph: {graph.Count} quads (leaf grid {totalCellsX}x{totalCellsZ}, cellSize {cellSize})");
+        Service.Log.Debug($"[ground] quad graph: {graph.Count} quads, {graph.Portals.Count} portals (leaf grid {totalCellsX}x{totalCellsZ}, cellSize {cellSize})");
         return graph;
     }
 
