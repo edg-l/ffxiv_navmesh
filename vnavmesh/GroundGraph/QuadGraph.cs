@@ -6,9 +6,12 @@ namespace Navmesh.GroundGraph;
 
 public class QuadGraph
 {
+    public const int FLAG_UNREACHABLE = 0x10;
+
     public List<Quad> Quads = [];
     public List<List<int>> Adjacency = [];
     public List<Portal> Portals = [];
+    public int[] Flags = [];
     public Vector3 BoundsMin;
     public Vector3 BoundsMax;
     public float MaxClimb;
@@ -150,12 +153,14 @@ public class QuadGraph
         return false;
     }
 
-    public int NearestQuad(Vector3 p, float maxDist = float.MaxValue)
+    public int NearestQuad(Vector3 p, float maxDist = float.MaxValue, bool allowUnreachable = true)
     {
         int best = -1;
         float bestDist = maxDist;
         for (int i = 0; i < Quads.Count; ++i)
         {
+            if (!allowUnreachable && i < Flags.Length && (Flags[i] & FLAG_UNREACHABLE) != 0)
+                continue;
             var q = Quads[i];
             if (q.ContainsXZ(p))
             {
@@ -172,6 +177,8 @@ public class QuadGraph
 
         for (int i = 0; i < Quads.Count; ++i)
         {
+            if (!allowUnreachable && i < Flags.Length && (Flags[i] & FLAG_UNREACHABLE) != 0)
+                continue;
             var q = Quads[i];
             var center = q.Center;
             var d = (center - p).LengthSquared();
@@ -182,6 +189,53 @@ public class QuadGraph
             }
         }
         return best;
+    }
+
+    public HashSet<int> FloodReachable(IEnumerable<int> seeds)
+    {
+        var result = new HashSet<int>();
+        var queue = new Queue<int>();
+        foreach (var s in seeds)
+        {
+            if (s >= 0 && !result.Contains(s))
+            {
+                result.Add(s);
+                queue.Enqueue(s);
+            }
+        }
+        while (queue.Count > 0)
+        {
+            var cur = queue.Dequeue();
+            foreach (var neighbor in Adjacency[cur])
+            {
+                if (result.Add(neighbor))
+                    queue.Enqueue(neighbor);
+            }
+            foreach (var portal in Portals)
+            {
+                if (portal.IsOffMesh && portal.FromQuad == cur && result.Add(portal.ToQuad))
+                    queue.Enqueue(portal.ToQuad);
+            }
+        }
+        return result;
+    }
+
+    public void ApplyReachable(HashSet<int> reachable)
+    {
+        if (Flags.Length < Quads.Count)
+            Flags = new int[Quads.Count];
+        for (int i = 0; i < Quads.Count; ++i)
+        {
+            if (reachable.Contains(i))
+                Flags[i] = 0;
+            else
+                Flags[i] = FLAG_UNREACHABLE;
+        }
+    }
+
+    public void InitFlags()
+    {
+        Flags = new int[Quads.Count];
     }
 
     public List<Vector3> Pathfind(Vector3 from, Vector3 to, bool useRaycast, bool useStringPulling, float range, System.Threading.CancellationToken cancel)

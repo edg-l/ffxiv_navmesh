@@ -157,6 +157,7 @@ public class NavmeshBuilder
         {
             Navmesh = Navmesh with { Ground = QuadMesher.GreedyMesh(Navmesh.Volume, BoundsMin, BoundsMax) };
             Navmesh.Ground!.BuildAdjacency(Settings.AgentMaxClimb);
+            Navmesh.Ground.InitFlags();
         }
 
         return results;

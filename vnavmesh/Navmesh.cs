@@ -45,7 +45,8 @@ public record class Navmesh(int CustomizationVersion, DtNavMesh Mesh, VoxelMap? 
 		using var compressedReader = new BinaryReader(new BrotliStream(reader.BaseStream, CompressionMode.Decompress, true));
 		var mesh = DeserializeMesh(compressedReader);
 		var volume = DeserializeVolume(compressedReader);
-		return new(customizationVersion, mesh, volume, null);
+		var ground = DeserializeGround(compressedReader);
+		return new(customizationVersion, mesh, volume, ground);
 	}
 
 	public void Serialize(BinaryWriter writer)
@@ -57,6 +58,7 @@ public record class Navmesh(int CustomizationVersion, DtNavMesh Mesh, VoxelMap? 
 		using var compressedWriter = new BinaryWriter(new BrotliStream(writer.BaseStream, CompressionLevel.Optimal, true));
 		SerializeMesh(compressedWriter, Mesh);
 		SerializeVolume(compressedWriter, Volume);
+		SerializeGround(compressedWriter, Ground);
 	}
 
 	private static DtNavMesh DeserializeMesh(BinaryReader reader)
@@ -298,6 +300,89 @@ public record class Navmesh(int CustomizationVersion, DtNavMesh Mesh, VoxelMap? 
 
 		SerializeBounds(writer, volume.RootTile.BoundsMin, volume.RootTile.BoundsMax);
 		SerializeVolumeTile(writer, volume.RootTile);
+	}
+
+	private static QuadGraph? DeserializeGround(BinaryReader reader)
+	{
+		try
+		{
+			var hasGround = reader.ReadBoolean();
+			if (!hasGround)
+				return null;
+
+			var boundsMin = DeserializeVector3(reader);
+			var boundsMax = DeserializeVector3(reader);
+			var graph = new QuadGraph(boundsMin, boundsMax);
+			graph.MaxClimb = reader.ReadSingle();
+
+			var quadCount = reader.ReadInt32();
+			for (int i = 0; i < quadCount; ++i)
+			{
+				var q = new Quad(
+					reader.ReadSingle(), reader.ReadSingle(), reader.ReadSingle(),
+					reader.ReadSingle(), reader.ReadSingle(), reader.ReadSingle(),
+					(Navmesh.AreaId)reader.ReadByte());
+				graph.AddQuad(q);
+			}
+
+			var portalCount = reader.ReadInt32();
+			for (int i = 0; i < portalCount; ++i)
+			{
+				var portal = new Portal(
+					reader.ReadInt32(), reader.ReadInt32(),
+					new Vector2(reader.ReadSingle(), reader.ReadSingle()),
+					new Vector2(reader.ReadSingle(), reader.ReadSingle()),
+					reader.ReadSingle(), reader.ReadSingle(),
+					reader.ReadBoolean(), (Navmesh.AreaId)reader.ReadByte());
+				graph.Portals.Add(portal);
+			}
+
+			var flagsCount = reader.ReadInt32();
+			graph.Flags = new int[flagsCount];
+			for (int i = 0; i < flagsCount; ++i)
+				graph.Flags[i] = reader.ReadInt32();
+
+			return graph;
+		}
+		catch (EndOfStreamException)
+		{
+			return null;
+		}
+	}
+
+	private static void SerializeGround(BinaryWriter writer, QuadGraph? graph)
+	{
+		if (graph == null)
+		{
+			writer.Write(false);
+			return;
+		}
+		writer.Write(true);
+		SerializeVector3(writer, graph.BoundsMin);
+		SerializeVector3(writer, graph.BoundsMax);
+		writer.Write(graph.MaxClimb);
+
+		writer.Write(graph.Quads.Count);
+		foreach (var q in graph.Quads)
+		{
+			writer.Write(q.MinX); writer.Write(q.MinY); writer.Write(q.MinZ);
+			writer.Write(q.MaxX); writer.Write(q.MaxY); writer.Write(q.MaxZ);
+			writer.Write((byte)q.Area);
+		}
+
+		writer.Write(graph.Portals.Count);
+		foreach (var p in graph.Portals)
+		{
+			writer.Write(p.FromQuad); writer.Write(p.ToQuad);
+			writer.Write(p.SpanMin.X); writer.Write(p.SpanMin.Y);
+			writer.Write(p.SpanMax.X); writer.Write(p.SpanMax.Y);
+			writer.Write(p.YFrom); writer.Write(p.YTo);
+			writer.Write(p.IsOffMesh); writer.Write((byte)p.Area);
+		}
+
+		writer.Write(graph.Flags.Length);
+		foreach (var f in graph.Flags)
+			writer.Write(f);
 	}
 
 	private static unsafe void DeserializeVolumeTile(BinaryReader reader, VoxelMap.Tile tile)

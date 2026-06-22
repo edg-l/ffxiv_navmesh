@@ -110,7 +110,11 @@ public sealed class NavmeshManager : IDisposable
 
 				var ff = await FloodFill.GetAsync();
 				if (ff.TryLookup(scene.TerritoryID, out var points))
+				{
 					Prune(points);
+					if (Navmesh?.Ground != null)
+						PruneGround(Navmesh.Ground, points);
+				}
 
 				OnNavmeshChanged?.Invoke(Navmesh, Query);
 			}, cts.Token);
@@ -404,5 +408,14 @@ public sealed class NavmeshManager : IDisposable
 		}
 
 		Log($"pruned {pruneCount} unreachable polygons");
+	}
+
+	public void PruneGround(GroundGraph.QuadGraph graph, IEnumerable<Vector3> points)
+	{
+		var seeds = points.Select(p => graph.NearestQuad(p)).Where(q => q >= 0).ToList();
+		Log($"ground prune: seeding from {seeds.Count} quads");
+		var reachable = graph.FloodReachable(seeds);
+		graph.ApplyReachable(reachable);
+		Log($"ground pruned {graph.Count - reachable.Count} unreachable quads (of {graph.Count})");
 	}
 }
