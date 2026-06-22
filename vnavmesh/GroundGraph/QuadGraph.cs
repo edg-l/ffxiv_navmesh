@@ -75,7 +75,6 @@ public class QuadGraph
     public void BuildAdjacency(float maxClimb)
     {
         MaxClimb = maxClimb;
-        var edgeTol = MathF.Max(maxClimb, 2.1f);
         for (int i = 0; i < Quads.Count; ++i)
             Adjacency[i].Clear();
         Portals.Clear();
@@ -86,7 +85,7 @@ public class QuadGraph
             for (int b = a + 1; b < Quads.Count; ++b)
             {
                 var qb = Quads[b];
-                if (TryFindSharedEdge(qa, qb, maxClimb, edgeTol, out var spanMin, out var spanMax, out var yFrom, out var yTo))
+                if (TryFindSharedEdge(qa, qb, maxClimb, out var spanMin, out var spanMax, out var yFrom, out var yTo))
                 {
                     Adjacency[a].Add(b);
                     Adjacency[b].Add(a);
@@ -96,7 +95,7 @@ public class QuadGraph
         }
     }
 
-    private static bool TryFindSharedEdge(Quad a, Quad b, float maxClimb, float edgeTol, out Vector2 spanMin, out Vector2 spanMax, out float yFrom, out float yTo)
+    private static bool TryFindSharedEdge(Quad a, Quad b, float maxClimb, out Vector2 spanMin, out Vector2 spanMax, out float yFrom, out float yTo)
     {
         spanMin = default;
         spanMax = default;
@@ -106,50 +105,47 @@ public class QuadGraph
         if (MathF.Abs(a.MinY - b.MinY) > maxClimb)
             return false;
 
-        float aMinX = a.MinX, aMaxX = a.MaxX, aMinZ = a.MinZ, aMaxZ = a.MaxZ;
-        float bMinX = b.MinX, bMaxX = b.MaxX, bMinZ = b.MinZ, bMaxZ = b.MaxZ;
-
-        if (MathF.Abs(aMaxX - bMinX) <= edgeTol)
+        if (MathF.Abs(a.MaxX - b.MinX) < 0.001f)
         {
-            var zMin = MathF.Max(aMinZ, bMinZ);
-            var zMax = MathF.Min(aMaxZ, bMaxZ);
+            var zMin = MathF.Max(a.MinZ, b.MinZ);
+            var zMax = MathF.Min(a.MaxZ, b.MaxZ);
             if (zMin < zMax)
             {
-                spanMin = new((aMaxX + bMinX) * 0.5f, zMin);
-                spanMax = new((aMaxX + bMinX) * 0.5f, zMax);
+                spanMin = new(a.MaxX, zMin);
+                spanMax = new(a.MaxX, zMax);
                 return true;
             }
         }
-        else if (MathF.Abs(aMinX - bMaxX) <= edgeTol)
+        else if (MathF.Abs(a.MinX - b.MaxX) < 0.001f)
         {
-            var zMin = MathF.Max(aMinZ, bMinZ);
-            var zMax = MathF.Min(aMaxZ, bMaxZ);
+            var zMin = MathF.Max(a.MinZ, b.MinZ);
+            var zMax = MathF.Min(a.MaxZ, b.MaxZ);
             if (zMin < zMax)
             {
-                spanMin = new((aMinX + bMaxX) * 0.5f, zMin);
-                spanMax = new((aMinX + bMaxX) * 0.5f, zMax);
+                spanMin = new(a.MinX, zMin);
+                spanMax = new(a.MinX, zMax);
                 return true;
             }
         }
-        else if (MathF.Abs(aMaxZ - bMinZ) <= edgeTol)
+        else if (MathF.Abs(a.MaxZ - b.MinZ) < 0.001f)
         {
-            var xMin = MathF.Max(aMinX, bMinX);
-            var xMax = MathF.Min(aMaxX, bMaxX);
+            var xMin = MathF.Max(a.MinX, b.MinX);
+            var xMax = MathF.Min(a.MaxX, b.MaxX);
             if (xMin < xMax)
             {
-                spanMin = new(xMin, (aMaxZ + bMinZ) * 0.5f);
-                spanMax = new(xMax, (aMaxZ + bMinZ) * 0.5f);
+                spanMin = new(xMin, a.MaxZ);
+                spanMax = new(xMax, a.MaxZ);
                 return true;
             }
         }
-        else if (MathF.Abs(aMinZ - bMaxZ) <= edgeTol)
+        else if (MathF.Abs(a.MinZ - b.MaxZ) < 0.001f)
         {
-            var xMin = MathF.Max(aMinX, bMinX);
-            var xMax = MathF.Min(aMaxX, bMaxX);
+            var xMin = MathF.Max(a.MinX, b.MinX);
+            var xMax = MathF.Min(a.MaxX, b.MaxX);
             if (xMin < xMax)
             {
-                spanMin = new(xMin, (aMinZ + bMaxZ) * 0.5f);
-                spanMax = new(xMax, (aMinZ + bMaxZ) * 0.5f);
+                spanMin = new(xMin, a.MinZ);
+                spanMax = new(xMax, a.MinZ);
                 return true;
             }
         }
@@ -246,6 +242,7 @@ public class QuadGraph
     {
         var fromQuad = NearestQuad(from);
         var toQuad = NearestQuad(to);
+        Service.Log.Debug($"[pathfind] quad {fromQuad} -> {toQuad} (of {Quads.Count} quads, {Portals.Count} portals)");
         if (fromQuad < 0 || toQuad < 0)
             return [];
 
@@ -254,12 +251,14 @@ public class QuadGraph
             ? pathfinder.FindPathWithRange(fromQuad, toQuad, from, to, range, useRaycast, cancel)
             : pathfinder.FindPath(fromQuad, toQuad, from, to, useRaycast, cancel);
 
+        Service.Log.Debug($"[pathfind] A* returned {path.Count} nodes");
         if (path.Count == 0)
             return [];
 
         if (useStringPulling)
         {
             var simplified = FunnelStringPull.Pull(this, path, from, to);
+            Service.Log.Debug($"[pathfind] funnel returned {simplified.Count} waypoints");
             return simplified;
         }
         else
