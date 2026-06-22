@@ -84,14 +84,106 @@ IPC safety: `Path.ListWaypoints` still returns `List<Vector3>` of positions — 
 - The LoS-based string-pull stops at the last voxel before LoS breaks, not at the optimal face-crossing point. Produces slightly more waypoints than an ideal projection-funnel but hits the 5-10x reduction target. A tighter funnel can be a follow-up if in-game testing shows it's needed.
 - `Simplify` calls `VoxelSearch.LineOfSight` which calls `EnumerateVoxelsInLine(...).All(v => v.empty)` — each LoS probe walks the voxel grid along the line. For very long paths with many probes, this is O(probes * voxels_per_line). If profiling shows this is hot, consider caching LoS results per (anchor, probe) pair or switching to the projection-funnel. Not a concern until measured.
 
-## Phase 2 — DotRecast submodule rebase (last)
+## Phase 2 — DotRecast submodule rebase (BLOCKED, needs user decision)
 
-Plan: fetch upstream, branch `rebase-to-upstream` off `upstream/main`, cherry-pick `91880dd` (span pooling, breaking, verify build) and `abff290` (early exit, fix the double `if (heuristicCost < 0)` copy-paste bug while cherry-picking), push to `origin` (confirm branch name with user first), bump the submodule pointer in the parent repo (stage but do NOT commit — user decides).
+Status: STOPPED. Submodule restored to original pointer `8002b30`. No changes
+committed for Phase 2. Phases 0 and 1 are committed and intact.
 
-Risks flagged:
-- Span pooling may be redundant or conflicting if upstream already reworked RcSpan in its 304 commits. Pre-cherry-pick recon: `git log --oneline 4b8cd8e..upstream/main -- src/DotRecast.Recast/RcSpan.cs src/DotRecast.Recast/RcHeightfield.cs` to check.
-- If upstream API churn breaks >10 plugin call sites in `vnavmesh/`, STOP and surface to the user with a fix list for approval.
-- The `goto break_outer` label in `abff290` must land in a loop structure that still supports it. Current upstream `DtNavMeshQuery.cs` has the label at line ~1001; verify after cherry-pick.
+### What blocked
+
+The plan assumed the fork's only meaningful Detour change was `abff290` (early
+exit), and that the rest of the fork's Detour work was droppable WIP. Wrong.
+The plugin's call site at `NavmeshQuery.cs:96`:
+
+```csharp
+MeshQuery.FindPath(startRef, endRef, from.SystemToRecast(), to.SystemToRecast(),
+    _pathFilter, ref _lastPath, opt);
+```
+
+uses a fork-specific overload `FindPath(..., ref List<long> path, DtFindPathOption fpo)`
+that does NOT exist in upstream `ikpil/DotRecast`. Upstream's signature is:
+
+```csharp
+FindPath(long startRef, long endRef, RcVec3f startPos, RcVec3f endPos,
+    IDtQueryFilter filter, Span<long> path, out int pathCount, int maxPath)
+```
+
+The fork's overload was built up across MULTIPLE fork commits, not just
+`abff290`:
+- `de3af0fc` "Experiment: always use edge intersection point for pathfinding"
+- `abff2907` "add early exit support to pathfind"
+- `60843e71` "WIP long distance portals"
+- `4b20f884` "fix raycast shortcut endpoint bug (again?)"
+
+All four touch `DtNavMeshQuery.cs` and together define the
+`FindPath(..., DtFindPathOption)` overload + the `IDtQueryHeuristic`
+plumbing + `GetEdgeIntersectionPoint` usage + the `GoalRadiusHeuristic`
+support that the plugin's `NavmeshQuery.GoalRadiusHeuristic` depends on.
+
+Upstream DOES have `DtFindPathOption`, `IDtQueryHeuristic`,
+`DtDefaultQueryHeuristic` structs/classes — but not the `FindPath` overload
+that takes them. Upstream's `FindPath` uses `Span<long>` + `out int pathCount`
++ `int maxPath`, not `ref List<long>` + `DtFindPathOption`.
+
+Additionally, the plan's other keep-patch `91880dd` (span pooling) is
+REDUNDANT: upstream added `RcSpanPool` + `AllocSpan/FreeSpan` API in April 2024
+(commits `6b2bd27b` and `f49f9eb5`), two months after the fork's March 2024
+attempt. Drop `91880dd` entirely — upstream's version is canonical.
+
+### What a clean rebase actually requires
+
+This is NOT a 2-patch cherry-pick. It requires:
+1. Port the fork's `FindPath(..., ref List<long>, DtFindPathOption)` overload
+   onto upstream's current `DtNavMeshQuery.cs`, reconciling with upstream's
+   `Span<long>`-based API. This means writing a new overload that wraps or
+   replaces upstream's signature, and porting the `IDtQueryHeuristic` call
+   site (the `heuristic.GetCost(neighbourPos, endPos)` line) into the
+   upstream loop structure.
+2. Port the `GetEdgeIntersectionPoint` usage from `de3af0fc` (the fork uses
+   it unconditionally; upstream uses `GetEdgeMidPoint`).
+3. Port the early-exit `goto break_outer` from `abff290`, fixing the
+   double-`if` bug, into the upstream loop structure.
+4. Decide whether to keep `60843e71` (WIP long distance portals) and
+   `4b20f884` (raycast shortcut endpoint fix) — these are WIP but the
+   plugin may depend on their behavior. Need to check if removing them
+   breaks the plugin's `useRaycast` path.
+5. Re-verify the plugin's `GoalRadiusHeuristic` (in `NavmeshQuery.cs`)
+   still works — it relies on the `IDtQueryHeuristic.GetCost` returning -1
+   for the early-exit trigger, which is fork-specific behavior.
+
+This is a substantial porting effort, not a cherry-pick. The plan's
+threshold (">10 call sites need rewriting -> STOP and surface") is exceeded
+in spirit: it's not 10 call sites, but it's one core API rewrite that
+cascades into behavioral questions about 4 fork commits.
+
+### Decision needed from user
+
+Options:
+A. **Abort Phase 2 entirely.** Keep the stale fork submodule as-is. Phases
+   0 and 1 are done and valuable on their own. The DotRecast fork works;
+   it's just stale. Document this as a known limitation.
+B. **Port the fork's FindPath overload to upstream.** Substantial work:
+   write a new overload on upstream's `DtNavMeshQuery.cs` that takes
+   `DtFindPathOption` + `ref List<long>`, port the `IDtQueryHeuristic`
+   call site, port the early-exit (fixing the double-if), decide on the
+   WIP commits. Then bump the submodule pointer. This is a real
+   feature-port, not a rebase.
+C. **Adapt the plugin to upstream's API.** Change `NavmeshQuery.cs:96` to
+   call upstream's `FindPath(..., Span<long>, out int, int)` instead of
+   the fork's overload. Lose the `DtFindPathOption` / `GoalRadiusHeuristic`
+   / early-exit behavior. This means the plugin's `range > 0` pathfinding
+   (used by `Nav.PathfindWithTolerance`) degrades to no-early-exit.
+   Simpler but a behavior regression.
+
+Recommend A (abort) or B (port) over C (regress). A is the lowest risk;
+B is the highest value. C loses a feature the plugin actively uses.
+
+### Fork submodule state (unchanged)
+
+- Pointer: `8002b30b9f196bcd9eb0a898e51abcea4177fb04` (original)
+- Branch: detached HEAD at the fork's tip
+- No branches created, no cherry-picks applied, no pushes.
+- To resume Phase 2 from a clean state, the submodule is ready as-is.
 
 ## Decisions log
 
