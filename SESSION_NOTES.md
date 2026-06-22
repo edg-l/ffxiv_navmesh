@@ -221,3 +221,33 @@ source-level porting of `NavmeshRasterizer.cs`, `NavmeshBuilder.cs`,
 - Keep two specialized pathfinders (Detour for ground, custom voxel A* for flight). Do NOT unify into a general 3D pathfinder — the TODO file flirts with this; it is a trap.
 - LoS-based string-pull (Phase 1) is preferred over the half-written projection-funnel skeleton. Simpler, obviously correct (every segment is LoS-verified by construction), reuses tested `VoxelSearch.LineOfSight`. Produces slightly more waypoints than an ideal funnel (stops at last voxel before LoS breaks, not at the optimal face-crossing point) but still hits the 5-10x reduction target. A tighter funnel can be a follow-up if needed.
 - Fork manifest description explicitly notes "fork" and "drop-in IPC compatible" so users installing alongside upstream `vnavmesh` (same `InternalName`) get a clear choice. Same `InternalName` means they cannot coexist — by design.
+
+## PLAN2 — Custom pathfinding lib (in progress, 7/11 phases done)
+
+Replaces the aborted DotRecast rebase. The user chose to build a custom
+FFXIV-specialized pathfinding lib. Architecture: **quad graph for ground**
+(greedy-meshed from walkable voxels, A* on quads, funnel string-pull) +
+**voxel A* for fly** (already done in Phases 0+1). No DotRecast dependency.
+
+Plan file: `PLAN2.md` (1170 lines, 11 phases). Do NOT commit it.
+
+### Completed phases (PLAN2)
+
+- Phase 1 (committed `c712b45`): Ground quad mesher. `GroundGraph/QuadMesher.cs` + `QuadGraph.cs`. `Navmesh.cs` gains `QuadGraph? Ground`, Version 24->25.
+- Phase 2 (committed `468da79`): Quad adjacency builder. `BuildAdjacency` wired into `NavmeshBuilder`.
+- Phase 3 (committed `b89be49`): Quad A* + funnel string-pull. `QuadPathfind.cs` + `FunnelStringPull.cs`. `QuadGraph.Pathfind` entry point.
+- Phase 4 (committed `bb08fd1`): Area annotations + territory markup port. `CustomizeGround`/`LinkQuads`/`AddOffMesh`. Z0132 + Z1252 ported. 6 other customizations (Z0155, Z0613, Z1237, Z1291, Z1310, Z1319) still use `LinkPoints` via `CustomizeMesh`; need porting before Phase 10.
+- Phase 5 (committed `9983a4d`): Reachability pruning on quad graph + serialization (save/load VoxelMap + QuadGraph per zone).
+- Phase 6 (committed `6f5b227`): Spline smoothing (Catmull-Rom through waypoints). `Movement/SplineSmoothing.cs`. `FollowPath.Move` applies it when `Config.SplineSmoothing` and `waypoints.Count >= 2`. Config gains `SplineSmoothing` + `SplineSegments` slider.
+- Phase 7 (uncommitted, build clean 0/0): Velocity-aware movement controller. `OverrideMovement` gains `MaxTurnRateDeg`/`EaseDistance`/`NextSegmentDir`/`LastDt` + `ComputeMagnitude` (ease-out + corner-speed modulation, PD term dropped as dead code) + turn-rate-limited azimuth in `DirectionToDestination`. `FollowPath.Update` feeds `NextSegmentDir`/`LastDt`/config values each tick. `Config` gains `MoveMaxTurnRate`/`MoveEaseDistance` + sliders. Fixed `Angle.FromRad` build error (constructor is `new Angle(float)`).
+
+### Remaining phases
+
+- Phase 8: Rewrite NavmeshManager + NavmeshQuery (PathfindMesh -> QuadGraph.Pathfind, signatures preserved).
+- Phase 9: Wire ground to quad graph + IPC verification.
+- Phase 10: Delete DotRecast + dependent code (submodule deinit, ~3500 lines, 9+ Debug files). Port remaining 6 customizations.
+- Phase 11: In-game verification + tuning + final audit.
+
+All committed phases build clean: 0 errors, 0 warnings. Phase 7 uncommitted
+but also builds clean; needs commit + in-game verification (sharp corner
+slowdown, ease-to-stop, fly vertical stays full-strength).

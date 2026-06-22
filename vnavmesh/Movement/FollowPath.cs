@@ -139,9 +139,15 @@ public class FollowPath : IDisposable
 				return;
 			}
 
-			OverrideAFK.ResetTimers();
-			_movement.Enabled = MovementAllowed;
-			_movement.DesiredPosition = Waypoints[0].Position;
+		OverrideAFK.ResetTimers();
+		_movement.Enabled = MovementAllowed;
+		_movement.DesiredPosition = Waypoints[0].Position;
+		_movement.LastDt = fwk.UpdateDelta.Milliseconds / 1000f;
+		_movement.MaxTurnRateDeg = Service.Config.MoveMaxTurnRate;
+		_movement.EaseDistance = Service.Config.MoveEaseDistance;
+		_movement.NextSegmentDir = Waypoints.Count > 1
+			? Waypoints[1].Position - Waypoints[0].Position
+			: Vector3.Zero;
 			if (_movement.DesiredPosition.Y > player.Position.Y && !Service.Condition[ConditionFlag.InFlight] && !Service.Condition[ConditionFlag.Diving] && !IgnoreDeltaY) //Only do this bit if on a flying path
 			{
 				// walk->fly transition (TODO: reconsider?)
