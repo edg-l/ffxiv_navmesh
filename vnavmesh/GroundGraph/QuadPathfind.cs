@@ -204,16 +204,36 @@ public class QuadPathfind
         var dist = dir.Length();
         if (dist < 0.001f)
             return true;
-        var dirNorm = dir / dist;
-        foreach (var quad in _graph.Quads)
+
+        var fromQuad = _graph.NearestQuad(from);
+        var toQuad = _graph.NearestQuad(to);
+        if (fromQuad < 0 || toQuad < 0)
+            return false;
+
+        var visited = new HashSet<int>();
+        var queue = new Queue<int>();
+        queue.Enqueue(fromQuad);
+        visited.Add(fromQuad);
+
+        while (queue.Count > 0)
         {
-            if (SegmentQuadXZIntersect(from, to, quad))
-                return false;
+            var cur = queue.Dequeue();
+            var q = _graph.Quads[cur];
+            if (SegmentQuadXZInside(from, to, q))
+            {
+                if (cur == toQuad)
+                    return true;
+                foreach (var neighbor in _graph.Adjacency[cur])
+                {
+                    if (visited.Add(neighbor))
+                        queue.Enqueue(neighbor);
+                }
+            }
         }
-        return true;
+        return false;
     }
 
-    private static bool SegmentQuadXZIntersect(Vector3 a, Vector3 b, Quad q)
+    private static bool SegmentQuadXZInside(Vector3 a, Vector3 b, Quad q)
     {
         float minX = q.MinX, maxX = q.MaxX, minZ = q.MinZ, maxZ = q.MaxZ;
         var d = b - a;
