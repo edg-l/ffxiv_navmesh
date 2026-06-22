@@ -74,46 +74,89 @@ public static class QuadMesher
     private static void ScanTile(VoxelMap.Tile tile, VoxelMap volume, Vector3 origin, Vector3 leafCellSize, int totalCellsX, int totalCellsZ, bool[] visited, float[] surfaceY, bool[] walkable)
     {
         var ld = tile.LevelDesc;
+        var isLeaf = tile.Level == volume.Levels.Length - 1;
+
         for (int i = 0; i < tile.Contents.Length; ++i)
         {
             var data = tile.Contents[i];
-            if ((data & VoxelMap.VoxelOccupiedBit) == 0)
-                continue;
+            var occupied = (data & VoxelMap.VoxelOccupiedBit) != 0;
+            var subIdx = data & VoxelMap.VoxelIdMask;
 
-            data &= VoxelMap.VoxelIdMask;
-            if (data == VoxelMap.VoxelIdMask)
-                continue;
-
-            var (cx, cy, cz) = ld.IndexToVoxel((ushort)i);
-            if (tile.Level < volume.Levels.Length - 1)
+            if (!occupied)
             {
-                ScanTile(tile.Subdivision[(int)data], volume, origin, leafCellSize, totalCellsX, totalCellsZ, visited, surfaceY, walkable);
+                var (cx, cy, cz) = ld.IndexToVoxel((ushort)i);
+                var worldPos = tile.VoxelToWorld(cx, cy, cz);
+                var belowPos = worldPos - new Vector3(0, ld.CellSize.Y, 0);
+                var belowVoxel = volume.FindLeafVoxel(belowPos);
+                if (!belowVoxel.empty)
+                {
+                    var solidTopY = belowPos.Y + ld.CellSize.Y * 0.5f;
+                    MarkWalkableRegion(worldPos, ld.CellSize, origin, leafCellSize, totalCellsX, totalCellsZ, surfaceY, walkable, solidTopY);
+                }
+                continue;
+            }
+
+            if (subIdx == VoxelMap.VoxelIdMask)
+                continue;
+
+            if (isLeaf)
+            {
+                var (cx, cy, cz) = ld.IndexToVoxel((ushort)i);
+                CheckWalkable(tile, cx, cy, cz, volume, origin, leafCellSize, totalCellsX, totalCellsZ, surfaceY, walkable);
             }
             else
             {
-                var worldPos = tile.VoxelToWorld(cx, cy, cz);
-                var aboveVoxel = volume.FindLeafVoxel(worldPos);
-                if (!aboveVoxel.empty)
-                    continue;
+                ScanTile(tile.Subdivision[subIdx], volume, origin, leafCellSize, totalCellsX, totalCellsZ, visited, surfaceY, walkable);
+            }
+        }
+    }
 
-                var belowPos = worldPos - new Vector3(0, leafCellSize.Y, 0);
-                var belowVoxel = volume.FindLeafVoxel(belowPos);
-                if (belowVoxel.empty)
-                    continue;
+    private static void MarkWalkableRegion(Vector3 worldPos, Vector3 cellSize, Vector3 origin, Vector3 leafCellSize, int totalCellsX, int totalCellsZ, float[] surfaceY, bool[] walkable, float solidTopY)
+    {
+        var xStart = (int)((worldPos.X - cellSize.X * 0.5f - origin.X) / leafCellSize.X);
+        var xEnd = (int)((worldPos.X + cellSize.X * 0.5f - origin.X) / leafCellSize.X);
+        var zStart = (int)((worldPos.Z - cellSize.Z * 0.5f - origin.Z) / leafCellSize.Z);
+        var zEnd = (int)((worldPos.Z + cellSize.Z * 0.5f - origin.Z) / leafCellSize.Z);
 
-                var leafIdxX = (int)((worldPos.X - origin.X) / leafCellSize.X);
-                var leafIdxZ = (int)((worldPos.Z - origin.Z) / leafCellSize.Z);
-                if (leafIdxX < 0 || leafIdxX >= totalCellsX || leafIdxZ < 0 || leafIdxZ >= totalCellsZ)
+        for (int z = zStart; z < zEnd; ++z)
+        {
+            for (int x = xStart; x < xEnd; ++x)
+            {
+                if (x < 0 || x >= totalCellsX || z < 0 || z >= totalCellsZ)
                     continue;
-
-                var idx = leafIdxZ * totalCellsX + leafIdxX;
-                var solidTopY = belowPos.Y + leafCellSize.Y * 0.5f;
+                var idx = z * totalCellsX + x;
                 if (!walkable[idx] || solidTopY > surfaceY[idx])
                 {
                     walkable[idx] = true;
                     surfaceY[idx] = solidTopY;
                 }
             }
+        }
+    }
+
+    private static void CheckWalkable(VoxelMap.Tile tile, int cx, int cy, int cz, VoxelMap volume, Vector3 origin, Vector3 leafCellSize, int totalCellsX, int totalCellsZ, float[] surfaceY, bool[] walkable)
+    {
+        var worldPos = tile.VoxelToWorld(cx, cy, cz);
+        var aboveVoxel = volume.FindLeafVoxel(worldPos);
+        if (!aboveVoxel.empty)
+            return;
+
+        var belowPos = worldPos - new Vector3(0, leafCellSize.Y, 0);
+        var belowVoxel = volume.FindLeafVoxel(belowPos);
+        if (belowVoxel.empty)
+            return;
+
+        var leafIdxX = (int)((worldPos.X - origin.X) / leafCellSize.X);
+        var leafIdxZ = (int)((worldPos.Z - origin.Z) / leafCellSize.Z);
+        if (leafIdxX < 0 || leafIdxX >= totalCellsX || leafIdxZ < 0 || leafIdxZ >= totalCellsZ)
+            return;
+
+        var idx = leafIdxZ * totalCellsX + leafIdxX;
+        var solidTopY = belowPos.Y + leafCellSize.Y * 0.5f;
+        if (!walkable[idx] || solidTopY > surfaceY[idx])
+        {
+            walkable[idx] = true;
+            surfaceY[idx] = solidTopY;
         }
     }
 
