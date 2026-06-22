@@ -62,7 +62,9 @@ public class QuadPathfind
         _goalQuad = toQuad;
         _goalPos = toPos;
 
-        _nodes.Add(new() { HScore = HeuristicDistance(fromPos), QuadId = fromQuad, ParentIndex = 0, OpenHeapIndex = -1, EnterPos = fromPos });
+        var startH = HeuristicDistance(fromPos);
+        Service.Log.Debug($"[pathfind] A* start: fromQuad={fromQuad} toQuad={toQuad} startH={startH} adjacency[from]={_graph.Adjacency[fromQuad].Count} adjacency[to]={_graph.Adjacency[toQuad].Count}");
+        _nodes.Add(new() { HScore = startH, QuadId = fromQuad, ParentIndex = 0, OpenHeapIndex = -1, EnterPos = fromPos });
         LookupSet(fromQuad, 0);
         AddToOpen(0);
     }
@@ -72,10 +74,14 @@ public class QuadPathfind
         for (int i = 0; i < maxSteps; ++i)
         {
             if (!ExecuteStep())
+            {
+                Service.Log.Debug($"[pathfind] A* stopped at step {i}, open={_openList.Count}, bestH={CollectionsMarshal.AsSpan(_nodes)[_bestNodeIndex].HScore}, nodes={_nodes.Count}");
                 return;
+            }
             if ((i & 0x3ff) == 0)
                 cancel.ThrowIfCancellationRequested();
         }
+        Service.Log.Debug($"[pathfind] A* hit max steps, nodes={_nodes.Count}");
     }
 
     private bool ExecuteStep()
