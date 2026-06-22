@@ -26,7 +26,6 @@ public class Config
     public bool SplineSmoothing = true;
     public int SplineSegments = 8;
     public float MoveMaxTurnRate = 720f;
-    public float MoveEaseDistance = 3f;
     public int BuildMaxCores = 1;
 
     private static readonly int realMaxCores = Environment.ProcessorCount;
@@ -97,12 +96,6 @@ public class Config
             NotifyModified();
         if (ImGui.IsItemHovered())
             ImGui.SetTooltip("Maximum rate at which the movement controller rotates toward the next waypoint. Lower = smoother but slower cornering.");
-
-        ImGui.SetNextItemWidth(200);
-        if (ImGui.SliderFloat("Ease distance (yalms)", ref MoveEaseDistance, 0.5f, 20f))
-            NotifyModified();
-        if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("Distance from a waypoint over which movement magnitude eases to zero. Prevents overshoot at stop.");
     }
 
     public void Save(FileInfo file)

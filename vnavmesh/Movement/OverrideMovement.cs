@@ -45,8 +45,6 @@ public unsafe class OverrideMovement : IDisposable
     public Vector3 DesiredPosition;
     public float Precision = 0.01f;
     public float MaxTurnRateDeg = 720f;
-    public float EaseDistance = 3f;
-    public Vector3 NextSegmentDir = Vector3.Zero;
     public float LastDt = 0.016f;
 
     private float _lastDesiredAzimuth;
@@ -99,10 +97,8 @@ public unsafe class OverrideMovement : IDisposable
         if (movementAllowed && (IgnoreUserInput || *sumLeft == 0 && *sumForward == 0) && DirectionToDestination(false) is var relDir && relDir != null)
         {
             var dir = relDir.Value.h.ToDirection();
-            var player = Service.ObjectTable.LocalPlayer;
-            var mag = player != null ? ComputeMagnitude(DesiredPosition, player.Position, LastDt) : 1f;
-            *sumLeft = dir.X * mag;
-            *sumForward = dir.Y * mag;
+            *sumLeft = dir.X;
+            *sumForward = dir.Y;
         }
     }
 
@@ -113,10 +109,8 @@ public unsafe class OverrideMovement : IDisposable
         if ((IgnoreUserInput || result->Forward == 0 && result->Left == 0 && result->Up == 0) && DirectionToDestination(true) is var relDir && relDir != null)
         {
             var dir = relDir.Value.h.ToDirection();
-            var player = Service.ObjectTable.LocalPlayer;
-            var mag = player != null ? ComputeMagnitude(DesiredPosition, player.Position, LastDt) : 1f;
-            result->Forward = dir.Y * mag;
-            result->Left = dir.X * mag;
+            result->Forward = dir.Y;
+            result->Left = dir.X;
             result->Up = relDir.Value.v.Rad;
         }
     }
@@ -147,28 +141,6 @@ public unsafe class OverrideMovement : IDisposable
         _lastDesiredAzimuth += azimuthDelta;
 
         return (new Angle(_lastDesiredAzimuth), dirV);
-    }
-
-    private float ComputeMagnitude(Vector3 desired, Vector3 playerPos, float dt)
-    {
-        var diff = desired - playerPos;
-        var dist = diff.Length();
-        if (dist < 0.01f)
-            return 0f;
-
-        var easeOut = Math.Clamp(dist / EaseDistance, 0f, 1f);
-
-        var nextDir = NextSegmentDir;
-        float cornerMod = 1f;
-        if (nextDir.LengthSquared() > 0.01f)
-        {
-            var currentDir = diff / dist;
-            var dot = Math.Clamp(Vector3.Dot(currentDir, Vector3.Normalize(nextDir)), -1f, 1f);
-            var turnError = MathF.Acos(dot) / MathF.PI;
-            cornerMod = Math.Clamp(1f - turnError, 0.25f, 1f);
-        }
-
-        return Math.Clamp(easeOut * cornerMod, 0f, 1f);
     }
 
     private void OnConfigChanged(object? sender, ConfigChangeEvent evt) => UpdateLegacyMode();
