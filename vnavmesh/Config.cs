@@ -23,6 +23,8 @@ public class Config
     public float StuckTolerance = 0.05f;
     public int StuckTimeoutMs = 500;
     public bool RetryOnStuck = true;
+    public bool SplineSmoothing = true;
+    public int SplineSegments = 8;
     public int BuildMaxCores = 1;
 
     private static readonly int realMaxCores = Environment.ProcessorCount;
@@ -77,6 +79,15 @@ public class Config
                 NotifyModified();
             if (ImGui.IsItemHovered())
                 ImGui.SetTooltip("If enabled, the agent will attempt to re-path after being considered stuck.");
+        }
+
+        if (ImGui.Checkbox("Path smoothing (spline)", ref SplineSmoothing))
+            NotifyModified();
+        using (ImRaii.Disabled(!SplineSmoothing))
+        {
+            ImGui.SetNextItemWidth(200);
+            if (ImGui.SliderInt("Spline segments", ref SplineSegments, 2, 32))
+                NotifyModified();
         }
     }
 

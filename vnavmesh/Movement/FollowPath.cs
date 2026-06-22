@@ -4,6 +4,7 @@ using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.Game;
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Numerics;
 
 namespace Navmesh.Movement;
@@ -220,7 +221,23 @@ public class FollowPath : IDisposable
 	public void Move(List<Waypoint> waypoints, bool ignoreDeltaY, float destTolerance = 0)
 	{
 		UpdateSharedState(true);
-		Waypoints = waypoints;
+		if (Service.Config.SplineSmoothing && waypoints.Count >= 2)
+		{
+			var positions = waypoints.Select(w => w.Position).ToList();
+			var smoothed = SplineSmoothing.CatmullRom(positions, Service.Config.SplineSegments);
+			var result = new List<Waypoint>(smoothed.Count);
+			for (int i = 0; i < smoothed.Count; ++i)
+			{
+				int nearestIdx = i == 0 ? 0 : i == smoothed.Count - 1 ? waypoints.Count - 1 : (int)((i / (float)(smoothed.Count - 1)) * (waypoints.Count - 1) + 0.5f);
+				nearestIdx = Math.Clamp(nearestIdx, 0, waypoints.Count - 1);
+				result.Add(new Waypoint(smoothed[i], waypoints[nearestIdx].Type));
+			}
+			Waypoints = result;
+		}
+		else
+		{
+			Waypoints = waypoints;
+		}
 		IgnoreDeltaY = ignoreDeltaY;
 		DestinationTolerance = destTolerance;
 	}
