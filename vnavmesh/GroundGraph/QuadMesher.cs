@@ -22,30 +22,24 @@ public static class QuadMesher
 
         var leafLevel = volume.Levels[^1];
         var cellSize = leafLevel.CellSize;
-        var cellsX = leafLevel.NumCellsX;
-        var cellsZ = leafLevel.NumCellsZ;
-        var cellsY = leafLevel.NumCellsY;
+        var origin = volume.RootTile.BoundsMin;
 
-        Service.Log.Debug($"[ground] leaf level: cells={cellsX}x{cellsY}x{cellsZ}, cellSize={cellSize}, levels={volume.Levels.Length}");
+        var totalCellsX = 1;
+        var totalCellsY = 1;
+        var totalCellsZ = 1;
+        foreach (var lvl in volume.Levels)
+        {
+            totalCellsX *= lvl.NumCellsX;
+            totalCellsY *= lvl.NumCellsY;
+            totalCellsZ *= lvl.NumCellsZ;
+        }
 
-        var (minX, minY, minZ) = WorldToLeafIndex(volume, boundsMin, leafLevel);
-        var (maxX, maxY, maxZ) = WorldToLeafIndex(volume, boundsMax, leafLevel);
-        minX = Math.Max(0, minX);
-        minY = Math.Max(0, minY);
-        minZ = Math.Max(0, minZ);
-        maxX = Math.Min(cellsX - 1, maxX);
-        maxY = Math.Min(cellsY - 1, maxY);
-        maxZ = Math.Min(cellsZ - 1, maxZ);
+        var (minX, minY, minZ) = WorldToLeafIndex(boundsMin, origin, cellSize, totalCellsX, totalCellsY, totalCellsZ);
+        var (maxX, maxY, maxZ) = WorldToLeafIndex(boundsMax, origin, cellSize, totalCellsX, totalCellsY, totalCellsZ);
 
-        Service.Log.Debug($"[ground] scan range: x=[{minX},{maxX}] y=[{minY},{maxY}] z=[{minZ},{maxZ}]");
-
-        int walkableCount = 0;
-        int occupiedCount = 0;
-        int emptyCount = 0;
-
-        var visited = new bool[cellsX * cellsZ];
-        var surfaceY = new float[cellsX * cellsZ];
-        var walkable = new bool[cellsX * cellsZ];
+        var visited = new bool[totalCellsX * totalCellsZ];
+        var surfaceY = new float[totalCellsX * totalCellsZ];
+        var walkable = new bool[totalCellsX * totalCellsZ];
 
         for (int y = minY; y <= maxY; ++y)
         {
@@ -56,22 +50,16 @@ public static class QuadMesher
             {
                 for (int x = minX; x <= maxX; ++x)
                 {
-                    var idx = z * cellsX + x;
-                    var abovePos = LeafIndexToWorld(volume, x, y, z, leafLevel);
+                    var idx = z * totalCellsX + x;
+                    var abovePos = LeafIndexToWorld(x, y, z, origin, cellSize);
                     var aboveVoxel = volume.FindLeafVoxel(abovePos);
                     if (aboveVoxel.empty)
-                        emptyCount++;
-                    else
-                        occupiedCount++;
-
-                    if (aboveVoxel.empty)
                     {
-                        var belowPos = LeafIndexToWorld(volume, x, y - 1, z, leafLevel);
+                        var belowPos = LeafIndexToWorld(x, y - 1, z, origin, cellSize);
                         var belowVoxel = volume.FindLeafVoxel(belowPos);
                         if (!belowVoxel.empty)
                         {
                             walkable[idx] = true;
-                            walkableCount++;
                             var solidTopY = belowPos.Y + cellSize.Y * 0.5f;
                             surfaceY[idx] = solidTopY;
                         }
@@ -83,34 +71,34 @@ public static class QuadMesher
             {
                 for (int x = minX; x <= maxX; ++x)
                 {
-                    var idx = z * cellsX + x;
+                    var idx = z * totalCellsX + x;
                     if (visited[idx] || !walkable[idx])
                         continue;
 
                     var surfY = surfaceY[idx];
                     var xEnd = x;
-                    while (xEnd + 1 <= maxX && !visited[(z * cellsX) + (xEnd + 1)] && walkable[(z * cellsX) + (xEnd + 1)] && surfaceY[(z * cellsX) + (xEnd + 1)] == surfY)
+                    while (xEnd + 1 <= maxX && !visited[(z * totalCellsX) + (xEnd + 1)] && walkable[(z * totalCellsX) + (xEnd + 1)] && surfaceY[(z * totalCellsX) + (xEnd + 1)] == surfY)
                         ++xEnd;
 
                     int stripStartX = x;
                     int stripEndX = xEnd;
                     int zEnd = z;
-                    while (zEnd + 1 <= maxZ && CanExtendStrip(cellsX, visited, walkable, surfaceY, stripStartX, stripEndX, zEnd + 1, surfY))
+                    while (zEnd + 1 <= maxZ && CanExtendStrip(totalCellsX, visited, walkable, surfaceY, stripStartX, stripEndX, zEnd + 1, surfY))
                         ++zEnd;
 
                     for (int markZ = z; markZ <= zEnd; ++markZ)
                         for (int markX = stripStartX; markX <= stripEndX; ++markX)
-                            visited[markZ * cellsX + markX] = true;
+                            visited[markZ * totalCellsX + markX] = true;
 
-                    var worldMin = LeafIndexToWorld(volume, stripStartX, y, z, leafLevel);
-                    var worldMax = LeafIndexToWorld(volume, stripEndX, y, zEnd, leafLevel);
+                    var worldMin = LeafIndexToWorld(stripStartX, y, z, origin, cellSize);
+                    var worldMax = LeafIndexToWorld(stripEndX, y, zEnd, origin, cellSize);
                     var quad = new Quad(worldMin.X, surfY, worldMin.Z, worldMax.X + cellSize.X, surfY, worldMax.Z + cellSize.Z, Navmesh.AreaId.Default);
                     graph.AddQuad(quad);
                 }
             }
         }
 
-        Service.Log.Debug($"[ground] voxel stats: {walkableCount} walkable, {occupiedCount} occupied, {emptyCount} empty, {graph.Count} quads");
+        Service.Log.Debug($"[ground] quad graph: {graph.Count} quads (leaf grid {totalCellsX}x{totalCellsY}x{totalCellsZ}, cellSize {cellSize})");
         return graph;
     }
 
@@ -125,15 +113,14 @@ public static class QuadMesher
         return true;
     }
 
-    private static (int x, int y, int z) WorldToLeafIndex(VoxelMap volume, Vector3 p, VoxelMap.Level leafLevel)
+    private static (int x, int y, int z) WorldToLeafIndex(Vector3 p, Vector3 origin, Vector3 cellSize, int totalX, int totalY, int totalZ)
     {
-        var frac = (p - volume.RootTile.BoundsMin) / leafLevel.CellSize;
-        return ((int)frac.X, (int)frac.Y, (int)frac.Z);
+        var frac = (p - origin) / cellSize;
+        return (Math.Clamp((int)frac.X, 0, totalX - 1), Math.Clamp((int)frac.Y, 0, totalY - 1), Math.Clamp((int)frac.Z, 0, totalZ - 1));
     }
 
-    private static Vector3 LeafIndexToWorld(VoxelMap volume, int x, int y, int z, VoxelMap.Level leafLevel)
+    private static Vector3 LeafIndexToWorld(int x, int y, int z, Vector3 origin, Vector3 cellSize)
     {
-        var basePos = volume.RootTile.BoundsMin + new Vector3((x + 0.5f) * leafLevel.CellSize.X, (y + 0.5f) * leafLevel.CellSize.Y, (z + 0.5f) * leafLevel.CellSize.Z);
-        return basePos;
+        return origin + new Vector3((x + 0.5f) * cellSize.X, (y + 0.5f) * cellSize.Y, (z + 0.5f) * cellSize.Z);
     }
 }

@@ -136,11 +136,6 @@ public class NavmeshBuilder
             Navmesh = Navmesh with { Ground = QuadMesher.GreedyMesh(Navmesh.Volume, BoundsMin, BoundsMax) };
             Navmesh.Ground!.BuildAdjacency(Settings.AgentMaxClimb);
             Navmesh.Ground.InitFlags();
-            Service.Log.Debug($"[ground] quad graph: {Navmesh.Ground.Count} quads, {Navmesh.Ground.Portals.Count} portals");
-        }
-        else
-        {
-            Service.Log.Debug("[ground] no volume, no ground graph built");
         }
     }
 
