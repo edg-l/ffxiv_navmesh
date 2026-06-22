@@ -1,4 +1,5 @@
 ﻿using DotRecast.Detour;
+using Navmesh.GroundGraph;
 using Navmesh.NavVolume;
 using System;
 using System.Collections.Generic;
@@ -9,10 +10,10 @@ using System.Numerics;
 namespace Navmesh;
 
 // full set of data needed for navigation in the zone
-public record class Navmesh(int CustomizationVersion, DtNavMesh Mesh, VoxelMap? Volume)
+public record class Navmesh(int CustomizationVersion, DtNavMesh Mesh, VoxelMap? Volume, QuadGraph? Ground)
 {
 	public static readonly uint Magic = 0x444D564E; // 'NVMD'
-	public static readonly uint Version = 24;
+	public static readonly uint Version = 25;
 	public const int FLAG_UNREACHABLE = 0x10;
 	public readonly List<(Vector3 Start, Vector3 End)> Links = []; // not serialized! actual links are added directly to the DtNavMesh, this field exists for visualization purposes
 
@@ -44,7 +45,7 @@ public record class Navmesh(int CustomizationVersion, DtNavMesh Mesh, VoxelMap? 
 		using var compressedReader = new BinaryReader(new BrotliStream(reader.BaseStream, CompressionMode.Decompress, true));
 		var mesh = DeserializeMesh(compressedReader);
 		var volume = DeserializeVolume(compressedReader);
-		return new(customizationVersion, mesh, volume);
+		return new(customizationVersion, mesh, volume, null);
 	}
 
 	public void Serialize(BinaryWriter writer)

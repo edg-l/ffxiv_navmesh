@@ -3,6 +3,7 @@ using DotRecast.Core.Numerics;
 using DotRecast.Detour;
 using DotRecast.Detour.Extras.Jumplink;
 using DotRecast.Recast;
+using Navmesh.GroundGraph;
 using Navmesh.NavVolume;
 using System;
 using System.Collections.Generic;
@@ -65,8 +66,8 @@ public class NavmeshBuilder
         navmeshParams.maxPolys = 1 << DtNavMesh.DT_POLY_BITS;
 
         var navmesh = new DtNavMesh(navmeshParams, Settings.PolyMaxVerts);
-        var volume = flyable ? new VoxelMap(BoundsMin, BoundsMax, Settings.NumTiles) : null;
-        Navmesh = new(customization.Version, navmesh, volume);
+        var volume = new VoxelMap(BoundsMin, BoundsMax, Settings.NumTiles);
+        Navmesh = new(customization.Version, navmesh, volume, null);
 
         // calculate derived parameters
         _walkableClimbVoxels = (int)MathF.Floor(Settings.AgentMaxClimb / Settings.CellHeight);
@@ -151,6 +152,9 @@ public class NavmeshBuilder
 
             results.Add(result);
         }
+
+        if (Navmesh.Volume != null)
+            Navmesh = Navmesh with { Ground = QuadMesher.GreedyMesh(Navmesh.Volume, BoundsMin, BoundsMax) };
 
         return results;
     }
