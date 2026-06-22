@@ -154,7 +154,10 @@ public class NavmeshBuilder
         }
 
         if (Navmesh.Volume != null)
+        {
             Navmesh = Navmesh with { Ground = QuadMesher.GreedyMesh(Navmesh.Volume, BoundsMin, BoundsMax) };
+            Navmesh.Ground!.BuildAdjacency(Settings.AgentMaxClimb);
+        }
 
         return results;
     }
