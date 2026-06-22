@@ -120,13 +120,17 @@ public static class QuadMesher
 
                 var surfY = surfaceY[idx];
                 var xEnd = x;
-                while (xEnd + 1 < totalCellsX && !visited[(z * totalCellsX) + (xEnd + 1)] && walkable[(z * totalCellsX) + (xEnd + 1)] && surfaceY[(z * totalCellsX) + (xEnd + 1)] == surfY)
+                while (xEnd + 1 < totalCellsX
+                       && !visited[(z * totalCellsX) + (xEnd + 1)]
+                       && walkable[(z * totalCellsX) + (xEnd + 1)]
+                       && surfaceY[(z * totalCellsX) + (xEnd + 1)] == surfY
+                       && IsClearBetween(volume, origin, leafCellSize, xEnd, z, xEnd + 1, z, surfY))
                     ++xEnd;
 
                 int stripStartX = x;
                 int stripEndX = xEnd;
                 int zEnd = z;
-                while (zEnd + 1 < totalCellsZ && CanExtendStrip(totalCellsX, visited, walkable, surfaceY, stripStartX, stripEndX, zEnd + 1, surfY))
+                while (zEnd + 1 < totalCellsZ && CanExtendStrip(totalCellsX, visited, walkable, surfaceY, volume, origin, leafCellSize, stripStartX, stripEndX, zEnd, zEnd + 1, surfY))
                     ++zEnd;
 
                 for (int markZ = z; markZ <= zEnd; ++markZ)
@@ -280,12 +284,34 @@ public static class QuadMesher
         }
     }
 
-    private static bool CanExtendStrip(int cellsX, bool[] visited, bool[] walkable, float[] surfaceY, int xStart, int xEnd, int z, float y)
+    private static bool CanExtendStrip(int cellsX, bool[] visited, bool[] walkable, float[] surfaceY, VoxelMap volume, Vector3 origin, Vector3 leafCellSize, int xStart, int xEnd, int zFrom, int zTo, float y)
     {
         for (int x = xStart; x <= xEnd; ++x)
         {
-            var idx = z * cellsX + x;
+            var idx = zTo * cellsX + x;
             if (visited[idx] || !walkable[idx] || surfaceY[idx] != y)
+                return false;
+            if (!IsClearBetween(volume, origin, leafCellSize, x, zFrom, x, zTo, y))
+                return false;
+        }
+        return true;
+    }
+
+    private static bool IsClearBetween(VoxelMap volume, Vector3 origin, Vector3 leafCellSize, int x1, int z1, int x2, int z2, float surfY)
+    {
+        if (x1 == x2 && z1 == z2)
+            return true;
+
+        var probeY = surfY + leafCellSize.Y * 0.5f;
+        var steps = Math.Max(Math.Abs(x2 - x1), Math.Abs(z2 - z1));
+        for (int s = 0; s <= steps; ++s)
+        {
+            var t = steps == 0 ? 0 : (float)s / steps;
+            var px = origin.X + (x1 + (x2 - x1) * t + 0.5f) * leafCellSize.X;
+            var pz = origin.Z + (z1 + (z2 - z1) * t + 0.5f) * leafCellSize.Z;
+            var probe = new Vector3(px, probeY, pz);
+            var voxel = volume.FindLeafVoxel(probe);
+            if (!voxel.empty)
                 return false;
         }
         return true;
