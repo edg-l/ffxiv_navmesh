@@ -222,7 +222,7 @@ source-level porting of `NavmeshRasterizer.cs`, `NavmeshBuilder.cs`,
 - LoS-based string-pull (Phase 1) is preferred over the half-written projection-funnel skeleton. Simpler, obviously correct (every segment is LoS-verified by construction), reuses tested `VoxelSearch.LineOfSight`. Produces slightly more waypoints than an ideal funnel (stops at last voxel before LoS breaks, not at the optimal face-crossing point) but still hits the 5-10x reduction target. A tighter funnel can be a follow-up if needed.
 - Fork manifest description explicitly notes "fork" and "drop-in IPC compatible" so users installing alongside upstream `vnavmesh` (same `InternalName`) get a clear choice. Same `InternalName` means they cannot coexist — by design.
 
-## PLAN2 — Custom pathfinding lib (in progress, 7/11 phases done)
+## PLAN2 — Custom pathfinding lib (in progress, 8/11 phases done)
 
 Replaces the aborted DotRecast rebase. The user chose to build a custom
 FFXIV-specialized pathfinding lib. Architecture: **quad graph for ground**
@@ -239,15 +239,18 @@ Plan file: `PLAN2.md` (1170 lines, 11 phases). Do NOT commit it.
 - Phase 4 (committed `bb08fd1`): Area annotations + territory markup port. `CustomizeGround`/`LinkQuads`/`AddOffMesh`. Z0132 + Z1252 ported. 6 other customizations (Z0155, Z0613, Z1237, Z1291, Z1310, Z1319) still use `LinkPoints` via `CustomizeMesh`; need porting before Phase 10.
 - Phase 5 (committed `9983a4d`): Reachability pruning on quad graph + serialization (save/load VoxelMap + QuadGraph per zone).
 - Phase 6 (committed `6f5b227`): Spline smoothing (Catmull-Rom through waypoints). `Movement/SplineSmoothing.cs`. `FollowPath.Move` applies it when `Config.SplineSmoothing` and `waypoints.Count >= 2`. Config gains `SplineSmoothing` + `SplineSegments` slider.
-- Phase 7 (committed `af71874`, revised `3e65379`/uncommitted revision): Velocity-aware movement controller — **turn-rate limiting only**. `OverrideMovement` gains `MaxTurnRateDeg`/`LastDt` + azimuth-delta clamp in `DirectionToDestination` (prevents 180° snap when next waypoint is behind player). `FollowPath.Update` feeds `LastDt` + `Config.MoveMaxTurnRate`. `Config` gains `MoveMaxTurnRate` + slider. **Magnitude scaling reverted**: FFXIV movement is binary (run-speed or stop), so `ComputeMagnitude`/`easeOut`/`cornerMod`/`EaseDistance`/`NextSegmentDir` were removed — they caused overshoot-then-spin loops at stop and stuck the volume pathfinder at every spline corner. Corner slowdown (Test 1) still works because turn-rate limiting indirectly slows cornering without modulating speed. In-game verified: Test 1 (corner) pass, Test 3 (no 180° snap) pass. Test 2 (ease-to-stop) handled by `FollowPath.Tolerance` + game's natural deceleration, not magnitude.
+- Phase 7 (reverted, committed `608aec1`): **ABANDONED.** Turn-rate limiting caused stuck pathfinding at tight corners. FFXIV binary movement + the game's own instant direction snap (original vnavmesh behavior) is what works. All Phase 7 code removed (MaxTurnRateDeg, LastDt, azimuth clamp, ComputeMagnitude, config fields). `OverrideMovement` is back to original binary direction. Spline smoothing (Phase 6) remains as the only movement-quality layer.
+
+- Phase 8 (committed, pending): Rewrite `NavmeshQuery` for ground → quad graph. `PathfindMesh` routes through `_ground.Pathfind` when a ground graph exists, with DtNavMesh fallback. All public method signatures preserved (`PathfindMesh`, `FindNearestMeshPoly`, `FindIntersectingMeshPolys`, `FindNearestPointOnMeshPoly`, `FindNearestPointOnMesh`, `FindPointOnFloor`, `FindReachableMeshPolys`, `GetAreaId`). First phase where the quad graph (Phases 1-6) is actually used for ground pathfinding. Needs in-game verification.
 
 ### Remaining phases
 
-- Phase 8: Rewrite NavmeshManager + NavmeshQuery (PathfindMesh -> QuadGraph.Pathfind, signatures preserved).
-- Phase 9: Wire ground to quad graph + IPC verification.
+- Phase 9: Wire ground to quad graph + IPC verification (explicit end-to-end verification of all IPC methods with quad graph as ground data source).
 - Phase 10: Delete DotRecast + dependent code (submodule deinit, ~3500 lines, 9+ Debug files). Port remaining 6 customizations.
 - Phase 11: In-game verification + tuning + final audit.
 
-All committed phases build clean: 0 errors, 0 warnings. Phase 7 uncommitted
-but also builds clean; needs commit + in-game verification (sharp corner
-slowdown, ease-to-stop, fly vertical stays full-strength).
+All committed phases build clean: 0 errors, 0 warnings. Phase 8 uncommitted
+but builds clean; needs commit + in-game verification (ground path in New
+Gridania / city with built ground graph; compare waypoint count/quality vs
+DotRecast; verify `Query.Mesh.NearestPoint`, `Query.Mesh.PointOnFloor`
+return sensible positions).
