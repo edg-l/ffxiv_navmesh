@@ -53,14 +53,36 @@ IPC safety: no IPC method referenced `RandomnessMultiplier`; `Path.ListWaypoints
 - `InitLookup(4096)` is a starting default. If a flying path ever exceeds 2048 visited voxels, `LookupGrow` doubles the table. The table sticks at the high-water mark across pathfinds (reused via `Array.Fill(-1)` in `Start`) — memory is tiny (16KB+ per size doubling), don't add a shrink path.
 - If you ever need to revert `_allowReopen` to `true` (currently `false`), the flat-array lookup supports it correctly — `LookupGet` finds closed nodes and the reopen path in `VisitNeighbour` will update them. No code change needed beyond flipping the bool.
 
-## Phase 1 — Volume string-pulling (next)
+## Phase 1 — Volume string-pulling (DONE, committed)
 
-Plan: rewrite `VoxelStraighten.cs` (currently entirely commented out) as a live class with `Simplify(List<(ulong voxel, Vector3 p)> path, Vector3 toPos)` using an iterative LoS-based string-pull (anchor/probe loop reusing `VoxelSearch.LineOfSight`). Wire into `NavmeshQuery.PathfindVolume` behind `useStringPulling`, replacing the `// TODO: string-pulling support` block.
+What changed:
+- `vnavmesh/NavVolume/VoxelStraighten.cs`: rewritten as a live class (was entirely commented out). `Simplify(List<(ulong voxel, Vector3 p)> path, Vector3 toPos) -> List<Vector3>` uses an iterative LoS-based string-pull: anchor + probe loop, commits `path[probe-1].p` when LoS from `result.Last()` to `path[probe].p` breaks, appends `path[^1].p` and `toPos` at the end. `HasLineOfSight` wraps `VoxelSearch.LineOfSight` in try/catch (`PathfindLoopException` -> no LoS) so a float-error re-entry at a voxel boundary doesn't abort the string-pull.
+- `vnavmesh/NavmeshQuery.cs:PathfindVolume`: replaced the `// TODO: string-pulling support` block with an `if (useStringPulling)` branch that calls `VoxelStraighten.Simplify(voxelPath, to)` and maps to `Waypoint`s. Mirrors `PathfindMesh`'s `if (useStringPulling) { FindStraightPath... }` structure. The non-string-pulling branch keeps the old behavior (raw voxel points + `to`).
 
-Key invariants (verified during plan review):
-- `FindClosestVoxelPoint` clamps with `eps=0.1f`, so a committed waypoint is always strictly inside its source voxel's AABB — `path[anchor].voxel` remains valid for the next LoS call.
-- `EnumerateVoxelsInLine` throws `PathfindLoopException` on float-error re-entry at a voxel boundary; `Simplify` must wrap the LoS call in try/catch and treat it as "no LoS" (commit previous, continue).
-- Do NOT conflate with `BuildPathToVisitedNode`'s `returnIntermediatePoints=true` (that subdivides, producing more points; string-pulling is a separate post-processing pass on the raw A* path).
+Edge cases handled (per plan review):
+- `path.Count == 0`: returns `[toPos]`.
+- `path.Count <= 2`: short-circuits to `[path[0].p, (path[1].p if != toPos), toPos]` without running the LoS loop.
+- `FindClosestVoxelPoint` clamps with `eps=0.1f` so committed waypoints are strictly inside their source voxel's AABB — `path[anchor].voxel` stays valid for the next LoS call (no re-voxelization needed).
+- `EnumerateVoxelsInLine` may throw `PathfindLoopException` on float-error re-entry at a voxel boundary; caught and treated as "no LoS".
+
+Build: 0 errors, 0 warnings.
+
+Static checks (all pass):
+- `rg "TODO: string-pulling" vnavmesh/` -> no matches.
+- `rg "^\s*//" vnavmesh/NavVolume/VoxelStraighten.cs` -> 0 (no commented-out remnants).
+
+IPC safety: `Path.ListWaypoints` still returns `List<Vector3>` of positions — type and signature unchanged. Waypoint count and positions change when `useStringPulling=true` (default), but that is a documented behavior change, not an API break.
+
+### Needs in-game verification (Phase 1)
+- IPC `Nav.Pathfind` with `fly=true` on a path with a long straight segment (e.g. across a large open field in Ishgard). Compare `Path.ListWaypoints` count before (Phase 0 build) and after (Phase 1 build) for the same from/to. Expect 5-10x fewer waypoints.
+- Enable `ShowWaypoints` config and visually confirm the waypoint line is smooth (no 90-degree kinks at every voxel face).
+- For each segment, confirm the player does not clip through geometry when following with `Path.MoveTo`. Test in a zone with obstacles (pillars in a city). A clip means `LineOfSight` has a bug, not that string-pulling is wrong — debug via the `PathfindLoopException` catch.
+- Confirm the final waypoint equals the requested `to` (within float epsilon) via `Path.ListWaypoints`.
+- IPC `Nav.Pathfind` with `fly=false` unchanged (string-pulling only touches the volume path; mesh pathfinder already had its own `FindStraightPath`).
+
+### Notes for future sessions
+- The LoS-based string-pull stops at the last voxel before LoS breaks, not at the optimal face-crossing point. Produces slightly more waypoints than an ideal projection-funnel but hits the 5-10x reduction target. A tighter funnel can be a follow-up if in-game testing shows it's needed.
+- `Simplify` calls `VoxelSearch.LineOfSight` which calls `EnumerateVoxelsInLine(...).All(v => v.empty)` — each LoS probe walks the voxel grid along the line. For very long paths with many probes, this is O(probes * voxels_per_line). If profiling shows this is hot, consider caching LoS results per (anchor, probe) pair or switching to the projection-funnel. Not a concern until measured.
 
 ## Phase 2 — DotRecast submodule rebase (last)
 

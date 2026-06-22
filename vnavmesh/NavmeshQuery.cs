@@ -151,7 +151,7 @@ public class NavmeshQuery
 		}
 
 		var timer = Timer.Create();
-		var voxelPath = VolumeQuery.FindPath(startVoxel, endVoxel, from, to, useRaycast, false, cancel); // TODO: do we need intermediate points for string-pulling algo?
+		var voxelPath = VolumeQuery.FindPath(startVoxel, endVoxel, from, to, useRaycast, false, cancel);
 		if (voxelPath.Count == 0)
 		{
 			Service.Log.Error($"Failed to find a path from {from} ({startVoxel:X}) to {to} ({endVoxel:X}): failed to find path on volume");
@@ -159,10 +159,18 @@ public class NavmeshQuery
 		}
 		Service.Log.Debug($"Pathfind took {timer.Value().TotalSeconds:f3}s: {string.Join(", ", voxelPath.Select(r => $"{r.p} {r.voxel:X}"))}");
 
-		// TODO: string-pulling support
-		var res = voxelPath.Select(r => new Waypoint(r.p)).ToList();
-		res.Add(new(to));
-		return res;
+		if (useStringPulling)
+		{
+			var straighten = new VoxelStraighten(VolumeQuery.Volume);
+			var simplified = straighten.Simplify(voxelPath, to);
+			return simplified.Select(p => new Waypoint(p)).ToList();
+		}
+		else
+		{
+			var res = voxelPath.Select(r => new Waypoint(r.p)).ToList();
+			res.Add(new(to));
+			return res;
+		}
 	}
 
 	// returns 0 if not found, otherwise polygon ref
