@@ -303,17 +303,31 @@ public static class QuadMesher
             return true;
 
         var probeY = surfY + leafCellSize.Y * 0.5f;
-        var steps = Math.Max(Math.Abs(x2 - x1), Math.Abs(z2 - z1));
-        for (int s = 0; s <= steps; ++s)
+
+        if (x1 != x2)
         {
-            var t = steps == 0 ? 0 : (float)s / steps;
-            var px = origin.X + (x1 + (x2 - x1) * t + 0.5f) * leafCellSize.X;
-            var pz = origin.Z + (z1 + (z2 - z1) * t + 0.5f) * leafCellSize.Z;
-            var probe = new Vector3(px, probeY, pz);
-            var voxel = volume.FindLeafVoxel(probe);
-            if (!voxel.empty)
-                return false;
+            var edgeX = origin.X + (Math.Max(x1, x2)) * leafCellSize.X;
+            var zCenter = origin.Z + (z1 + 0.5f) * leafCellSize.Z;
+            for (int i = -1; i <= 1; ++i)
+            {
+                var probe = new Vector3(edgeX, probeY + i * leafCellSize.Y, zCenter);
+                if (!volume.FindLeafVoxel(probe).empty)
+                    return false;
+            }
         }
+
+        if (z1 != z2)
+        {
+            var edgeZ = origin.Z + (Math.Max(z1, z2)) * leafCellSize.Z;
+            var xCenter = origin.X + (x1 + 0.5f) * leafCellSize.X;
+            for (int i = -1; i <= 1; ++i)
+            {
+                var probe = new Vector3(xCenter, probeY + i * leafCellSize.Y, edgeZ);
+                if (!volume.FindLeafVoxel(probe).empty)
+                    return false;
+            }
+        }
+
         return true;
     }
 }
