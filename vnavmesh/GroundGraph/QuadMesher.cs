@@ -19,87 +19,102 @@ public static class QuadMesher
     public static QuadGraph GreedyMesh(VoxelMap volume, Vector3 boundsMin, Vector3 boundsMax)
     {
         var graph = new QuadGraph(boundsMin, boundsMax);
-
         var leafLevel = volume.Levels[^1];
         var cellSize = leafLevel.CellSize;
         var origin = volume.RootTile.BoundsMin;
 
         var totalCellsX = 1;
-        var totalCellsY = 1;
         var totalCellsZ = 1;
         foreach (var lvl in volume.Levels)
         {
             totalCellsX *= lvl.NumCellsX;
-            totalCellsY *= lvl.NumCellsY;
             totalCellsZ *= lvl.NumCellsZ;
         }
-
-        var (minX, minY, minZ) = WorldToLeafIndex(boundsMin, origin, cellSize, totalCellsX, totalCellsY, totalCellsZ);
-        var (maxX, maxY, maxZ) = WorldToLeafIndex(boundsMax, origin, cellSize, totalCellsX, totalCellsY, totalCellsZ);
 
         var visited = new bool[totalCellsX * totalCellsZ];
         var surfaceY = new float[totalCellsX * totalCellsZ];
         var walkable = new bool[totalCellsX * totalCellsZ];
 
-        for (int y = minY; y <= maxY; ++y)
+        ScanTile(volume.RootTile, volume, origin, cellSize, totalCellsX, totalCellsZ, visited, surfaceY, walkable);
+
+        for (int z = 0; z < totalCellsZ; ++z)
         {
-            Array.Fill(visited, false);
-            Array.Fill(walkable, false);
-
-            for (int z = minZ; z <= maxZ; ++z)
+            for (int x = 0; x < totalCellsX; ++x)
             {
-                for (int x = minX; x <= maxX; ++x)
-                {
-                    var idx = z * totalCellsX + x;
-                    var abovePos = LeafIndexToWorld(x, y, z, origin, cellSize);
-                    var aboveVoxel = volume.FindLeafVoxel(abovePos);
-                    if (aboveVoxel.empty)
-                    {
-                        var belowPos = LeafIndexToWorld(x, y - 1, z, origin, cellSize);
-                        var belowVoxel = volume.FindLeafVoxel(belowPos);
-                        if (!belowVoxel.empty)
-                        {
-                            walkable[idx] = true;
-                            var solidTopY = belowPos.Y + cellSize.Y * 0.5f;
-                            surfaceY[idx] = solidTopY;
-                        }
-                    }
-                }
-            }
+                var idx = z * totalCellsX + x;
+                if (visited[idx] || !walkable[idx])
+                    continue;
 
-            for (int z = minZ; z <= maxZ; ++z)
-            {
-                for (int x = minX; x <= maxX; ++x)
-                {
-                    var idx = z * totalCellsX + x;
-                    if (visited[idx] || !walkable[idx])
-                        continue;
+                var surfY = surfaceY[idx];
+                var xEnd = x;
+                while (xEnd + 1 < totalCellsX && !visited[(z * totalCellsX) + (xEnd + 1)] && walkable[(z * totalCellsX) + (xEnd + 1)] && surfaceY[(z * totalCellsX) + (xEnd + 1)] == surfY)
+                    ++xEnd;
 
-                    var surfY = surfaceY[idx];
-                    var xEnd = x;
-                    while (xEnd + 1 <= maxX && !visited[(z * totalCellsX) + (xEnd + 1)] && walkable[(z * totalCellsX) + (xEnd + 1)] && surfaceY[(z * totalCellsX) + (xEnd + 1)] == surfY)
-                        ++xEnd;
+                int stripStartX = x;
+                int stripEndX = xEnd;
+                int zEnd = z;
+                while (zEnd + 1 < totalCellsZ && CanExtendStrip(totalCellsX, visited, walkable, surfaceY, stripStartX, stripEndX, zEnd + 1, surfY))
+                    ++zEnd;
 
-                    int stripStartX = x;
-                    int stripEndX = xEnd;
-                    int zEnd = z;
-                    while (zEnd + 1 <= maxZ && CanExtendStrip(totalCellsX, visited, walkable, surfaceY, stripStartX, stripEndX, zEnd + 1, surfY))
-                        ++zEnd;
+                for (int markZ = z; markZ <= zEnd; ++markZ)
+                    for (int markX = stripStartX; markX <= stripEndX; ++markX)
+                        visited[markZ * totalCellsX + markX] = true;
 
-                    for (int markZ = z; markZ <= zEnd; ++markZ)
-                        for (int markX = stripStartX; markX <= stripEndX; ++markX)
-                            visited[markZ * totalCellsX + markX] = true;
-
-                    var worldMin = LeafIndexToWorld(stripStartX, y, z, origin, cellSize);
-                    var worldMax = LeafIndexToWorld(stripEndX, y, zEnd, origin, cellSize);
-                    var quad = new Quad(worldMin.X, surfY, worldMin.Z, worldMax.X + cellSize.X, surfY, worldMax.Z + cellSize.Z, Navmesh.AreaId.Default);
-                    graph.AddQuad(quad);
-                }
+                var worldMin = origin + new Vector3(stripStartX * cellSize.X, 0, z * cellSize.Z);
+                var worldMax = origin + new Vector3((stripEndX + 1) * cellSize.X, 0, (zEnd + 1) * cellSize.Z);
+                var quad = new Quad(worldMin.X, surfY, worldMin.Z, worldMax.X, surfY, worldMax.Z, Navmesh.AreaId.Default);
+                graph.AddQuad(quad);
             }
         }
 
-        Service.Log.Debug($"[ground] quad graph: {graph.Count} quads (leaf grid {totalCellsX}x{totalCellsY}x{totalCellsZ}, cellSize {cellSize})");
+        Service.Log.Debug($"[ground] quad graph: {graph.Count} quads (leaf grid {totalCellsX}x{totalCellsZ}, cellSize {cellSize})");
         return graph;
+    }
+
+    private static void ScanTile(VoxelMap.Tile tile, VoxelMap volume, Vector3 origin, Vector3 leafCellSize, int totalCellsX, int totalCellsZ, bool[] visited, float[] surfaceY, bool[] walkable)
+    {
+        var ld = tile.LevelDesc;
+        for (int i = 0; i < tile.Contents.Length; ++i)
+        {
+            var data = tile.Contents[i];
+            if ((data & VoxelMap.VoxelOccupiedBit) == 0)
+                continue;
+
+            data &= VoxelMap.VoxelIdMask;
+            if (data == VoxelMap.VoxelIdMask)
+                continue;
+
+            var (cx, cy, cz) = ld.IndexToVoxel((ushort)i);
+            if (tile.Level < volume.Levels.Length - 1)
+            {
+                ScanTile(tile.Subdivision[(int)data], volume, origin, leafCellSize, totalCellsX, totalCellsZ, visited, surfaceY, walkable);
+            }
+            else
+            {
+                var worldPos = tile.VoxelToWorld(cx, cy, cz);
+                var aboveVoxel = volume.FindLeafVoxel(worldPos);
+                if (!aboveVoxel.empty)
+                    continue;
+
+                var belowPos = worldPos - new Vector3(0, leafCellSize.Y, 0);
+                var belowVoxel = volume.FindLeafVoxel(belowPos);
+                if (belowVoxel.empty)
+                    continue;
+
+                var leafIdxX = (int)((worldPos.X - origin.X) / leafCellSize.X);
+                var leafIdxZ = (int)((worldPos.Z - origin.Z) / leafCellSize.Z);
+                if (leafIdxX < 0 || leafIdxX >= totalCellsX || leafIdxZ < 0 || leafIdxZ >= totalCellsZ)
+                    continue;
+
+                var idx = leafIdxZ * totalCellsX + leafIdxX;
+                var solidTopY = belowPos.Y + leafCellSize.Y * 0.5f;
+                if (!walkable[idx] || solidTopY > surfaceY[idx])
+                {
+                    walkable[idx] = true;
+                    surfaceY[idx] = solidTopY;
+                }
+            }
+        }
     }
 
     private static bool CanExtendStrip(int cellsX, bool[] visited, bool[] walkable, float[] surfaceY, int xStart, int xEnd, int z, float y)
@@ -111,16 +126,5 @@ public static class QuadMesher
                 return false;
         }
         return true;
-    }
-
-    private static (int x, int y, int z) WorldToLeafIndex(Vector3 p, Vector3 origin, Vector3 cellSize, int totalX, int totalY, int totalZ)
-    {
-        var frac = (p - origin) / cellSize;
-        return (Math.Clamp((int)frac.X, 0, totalX - 1), Math.Clamp((int)frac.Y, 0, totalY - 1), Math.Clamp((int)frac.Z, 0, totalZ - 1));
-    }
-
-    private static Vector3 LeafIndexToWorld(int x, int y, int z, Vector3 origin, Vector3 cellSize)
-    {
-        return origin + new Vector3((x + 0.5f) * cellSize.X, (y + 0.5f) * cellSize.Y, (z + 0.5f) * cellSize.Z);
     }
 }
