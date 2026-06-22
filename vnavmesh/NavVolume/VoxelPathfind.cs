@@ -20,7 +20,8 @@ public class VoxelPathfind
 
     private VoxelMap _volume;
     private List<Node> _nodes = new(); // grow only (TODO: consider chunked vector)
-    private Dictionary<ulong, int> _nodeLookup = new(); // voxel -> node index
+    private int[] _lookupTable = Array.Empty<int>(); // open-addressing hash: voxel hash -> node index (-1 = empty)
+    private int _lookupMask; // table size - 1, power of two
     private List<int> _openList = new(); // heap containing node indices
     private int _bestNodeIndex;
     private ulong _goalVoxel;
@@ -48,7 +49,7 @@ public class VoxelPathfind
     public void Start(ulong fromVoxel, ulong toVoxel, Vector3 fromPos, Vector3 toPos)
     {
         _nodes.Clear();
-        _nodeLookup.Clear();
+        InitLookup(4096);
         _openList.Clear();
         _bestNodeIndex = 0;
         if (fromVoxel == VoxelMap.InvalidVoxel || toVoxel == VoxelMap.InvalidVoxel)
@@ -61,7 +62,7 @@ public class VoxelPathfind
         _goalPos = toPos;
 
         _nodes.Add(new() { HScore = HeuristicDistance(fromVoxel, fromPos), Voxel = fromVoxel, ParentIndex = 0, OpenHeapIndex = -1, Position = fromPos }); // start's parent is self
-        _nodeLookup[fromVoxel] = 0;
+        LookupSet(fromVoxel, 0);
         AddToOpen(0);
         //Service.Log.Debug($"volume pathfind: {fromPos} ({fromVoxel:X}) to {toPos} ({toVoxel:X})");
     }
@@ -318,13 +319,15 @@ public class VoxelPathfind
 
     private void VisitNeighbour(int parentIndex, ulong nodeVoxel)
     {
-        var nodeIndex = _nodeLookup.GetValueOrDefault(nodeVoxel, -1);
+        var nodeIndex = LookupGet(nodeVoxel);
         if (nodeIndex < 0)
         {
             // first time we're visiting this node, calculate heuristic
             nodeIndex = _nodes.Count;
             _nodes.Add(new() { GScore = float.MaxValue, HScore = float.MaxValue, Voxel = nodeVoxel, ParentIndex = parentIndex, OpenHeapIndex = -1 });
-            _nodeLookup[nodeVoxel] = nodeIndex;
+            LookupSet(nodeVoxel, nodeIndex);
+            if (_nodes.Count > _lookupTable.Length / 2)
+                LookupGrow();
         }
         else if (!_allowReopen && _nodes[nodeIndex].OpenHeapIndex < 0)
         {
@@ -352,11 +355,8 @@ public class VoxelPathfind
         }
     }
 
-    private Random _rng = new();
     private float CalculateGScore(ref Node parent, ulong destVoxel, Vector3 destPos, ref int parentIndex)
     {
-        float randomFactor = (float)_rng.NextDouble() * Service.Config.RandomnessMultiplier;
-
         float baseDistance;
         float parentBaseG;
         Vector3 fromPos;
@@ -392,7 +392,7 @@ public class VoxelPathfind
         float verticalDifference = MathF.Abs(fromPos.Y - destPos.Y);
         float verticalPenalty = 0.2f * verticalDifference;
 
-        return parentBaseG + baseDistance + randomFactor + verticalPenalty;
+        return parentBaseG + baseDistance + verticalPenalty;
     }
 
     private float HeuristicDistance(ulong nodeVoxel, Vector3 v) => nodeVoxel != _goalVoxel ? (v - _goalPos).Length() * 0.999f : 0;
@@ -407,6 +407,59 @@ public class VoxelPathfind
         }
         // update location
         PercolateUp(node.OpenHeapIndex);
+    }
+
+    private static int VoxelHash(ulong v)
+    {
+        v ^= v >> 33;
+        v *= 0xff51afd7ed558ccdUL;
+        v ^= v >> 33;
+        v *= 0xc4ceb9fe1a85ec53UL;
+        v ^= v >> 33;
+        return (int)v;
+    }
+
+    private void InitLookup(int capacity)
+    {
+        int size = 1;
+        while (size < capacity * 2)
+            size <<= 1;
+        if (_lookupTable.Length < size)
+            _lookupTable = new int[size];
+        Array.Fill(_lookupTable, -1);
+        _lookupMask = size - 1;
+    }
+
+    private int LookupGet(ulong voxel)
+    {
+        int i = VoxelHash(voxel) & _lookupMask;
+        while (_lookupTable[i] >= 0)
+        {
+            if (_nodes[_lookupTable[i]].Voxel == voxel)
+                return _lookupTable[i];
+            i = (i + 1) & _lookupMask;
+        }
+        return -1;
+    }
+
+    private void LookupSet(ulong voxel, int nodeIndex)
+    {
+        int i = VoxelHash(voxel) & _lookupMask;
+        while (_lookupTable[i] >= 0)
+            i = (i + 1) & _lookupMask;
+        _lookupTable[i] = nodeIndex;
+    }
+
+    private void LookupGrow()
+    {
+        var oldTable = _lookupTable;
+        int newSize = oldTable.Length << 1;
+        _lookupTable = new int[newSize];
+        Array.Fill(_lookupTable, -1);
+        _lookupMask = newSize - 1;
+        var nodeSpan = NodeSpan;
+        for (int n = 0; n < _nodes.Count; ++n)
+            LookupSet(nodeSpan[n].Voxel, n);
     }
 
     // remove first (minimal) node from open heap and mark as closed

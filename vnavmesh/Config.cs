@@ -23,7 +23,6 @@ public class Config
     public float StuckTolerance = 0.05f;
     public int StuckTimeoutMs = 500;
     public bool RetryOnStuck = true;
-    public float RandomnessMultiplier = 1f;
     public int BuildMaxCores = 1;
 
     private static readonly int realMaxCores = Environment.ProcessorCount;
@@ -79,10 +78,6 @@ public class Config
             if (ImGui.IsItemHovered())
                 ImGui.SetTooltip("If enabled, the agent will attempt to re-path after being considered stuck.");
         }
-
-        ImGui.SetNextItemWidth(200);
-        if (ImGui.SliderFloat("Randomness Multiplier", ref RandomnessMultiplier, 0f, 1.0f, "%.2f"))
-            NotifyModified();
     }
 
     public void Save(FileInfo file)
