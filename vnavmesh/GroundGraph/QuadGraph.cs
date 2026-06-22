@@ -240,9 +240,11 @@ public class QuadGraph
 
     public List<Vector3> Pathfind(Vector3 from, Vector3 to, bool useRaycast, bool useStringPulling, float range, System.Threading.CancellationToken cancel)
     {
-        var fromQuad = NearestQuad(from);
-        var toQuad = NearestQuad(to);
-        Service.Log.Debug($"[pathfind] quad {fromQuad} -> {toQuad} (of {Quads.Count} quads, {Portals.Count} portals)");
+        var fromQuad = NearestQuad(from, float.MaxValue, false);
+        var toQuad = NearestQuad(to, float.MaxValue, false);
+        var fromReachable = fromQuad >= 0 && fromQuad < Flags.Length && (Flags[fromQuad] & FLAG_UNREACHABLE) == 0;
+        var toReachable = toQuad >= 0 && toQuad < Flags.Length && (Flags[toQuad] & FLAG_UNREACHABLE) == 0;
+        Service.Log.Debug($"[pathfind] quad {fromQuad} -> {toQuad} (of {Quads.Count} quads, {Portals.Count} portals; fromReachable={fromReachable}, toReachable={toReachable})");
         if (fromQuad < 0 || toQuad < 0)
             return [];
 
