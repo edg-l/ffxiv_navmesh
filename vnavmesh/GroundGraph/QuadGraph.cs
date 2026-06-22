@@ -29,6 +29,46 @@ public class QuadGraph
         return index;
     }
 
+    public void SetArea(int quadId, Navmesh.AreaId area)
+    {
+        var q = Quads[quadId];
+        Quads[quadId] = q with { Area = q.Area | area };
+    }
+
+    public void MarkAreaBox(Vector3 min, Vector3 max, Navmesh.AreaId area)
+    {
+        for (int i = 0; i < Quads.Count; ++i)
+        {
+            var q = Quads[i];
+            if (q.MaxX >= min.X && q.MinX <= max.X && q.MaxZ >= min.Z && q.MinZ <= max.Z && q.MinY >= min.Y && q.MinY <= max.Y)
+                SetArea(i, area);
+        }
+    }
+
+    public int AddOffMesh(Vector3 a, Vector3 b, Navmesh.AreaId area, float radius = 0.5f, bool bidirectional = false, int userId = 0)
+    {
+        var quadA = NearestQuad(a, radius + 5f);
+        var quadB = NearestQuad(b, radius + 5f);
+        if (quadA < 0 || quadB < 0)
+            return -1;
+
+        var qa = Quads[quadA];
+        var qb = Quads[quadB];
+        var spanMinA = new Vector2(Math.Clamp(a.X, qa.MinX, qa.MaxX), Math.Clamp(a.Z, qa.MinZ, qa.MaxZ));
+        var spanMaxA = spanMinA;
+        var spanMinB = new Vector2(Math.Clamp(b.X, qb.MinX, qb.MaxX), Math.Clamp(b.Z, qb.MinZ, qb.MaxZ));
+        var spanMaxB = spanMinB;
+
+        Portals.Add(new Portal(quadA, quadB, spanMinA, spanMaxA, a.Y, b.Y, true, area | Navmesh.AreaId.Endpoint));
+        Adjacency[quadA].Add(quadB);
+        if (bidirectional)
+        {
+            Portals.Add(new Portal(quadB, quadA, spanMinB, spanMaxB, b.Y, a.Y, true, area | Navmesh.AreaId.Endpoint));
+            Adjacency[quadB].Add(quadA);
+        }
+        return quadA;
+    }
+
     public void BuildAdjacency(float maxClimb)
     {
         MaxClimb = maxClimb;

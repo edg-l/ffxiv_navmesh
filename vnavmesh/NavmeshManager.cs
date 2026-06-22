@@ -282,6 +282,8 @@ public sealed class NavmeshManager : IDisposable
 				using var reader = new BinaryReader(stream);
 				var mesh = Navmesh.Deserialize(reader, customization.Version);
 				customization.CustomizeMesh(mesh, layers);
+				if (mesh.Ground != null)
+					customization.CustomizeGround(mesh.Ground, layers);
 				return mesh;
 			}
 			catch (Exception ex)
@@ -308,6 +310,8 @@ public sealed class NavmeshManager : IDisposable
 			builder.Navmesh.Serialize(writer);
 		}
 		customization.CustomizeMesh(builder.Navmesh, layers);
+		if (builder.Navmesh.Ground != null)
+			customization.CustomizeGround(builder.Navmesh.Ground, layers);
 		deltaProgress += 0.01f;
 		return builder.Navmesh;
 	}

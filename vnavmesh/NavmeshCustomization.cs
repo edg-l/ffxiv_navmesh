@@ -1,6 +1,7 @@
 ﻿using DotRecast.Detour;
 using DotRecast.Recast;
 using FFXIVClientStructs.FFXIV.Common.Component.BGCollision.Math;
+using Navmesh.GroundGraph;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
@@ -34,6 +35,15 @@ public class NavmeshCustomization
 	public virtual void CustomizeSettings(DtNavMeshCreateParams config) { }
 
 	public virtual void CustomizeMesh(Navmesh mesh, List<uint> festivalLayers) { }
+
+	public virtual void CustomizeGround(QuadGraph graph, List<uint> festivalLayers) { }
+
+	protected static (int a, int b) LinkQuads(QuadGraph graph, Vector3 a, Vector3 b, Navmesh.AreaId area = Navmesh.AreaId.ClientPath)
+	{
+		var quadA = graph.AddOffMesh(a, b, area | Navmesh.AreaId.Endpoint);
+		var quadB = graph.NearestQuad(b);
+		return (quadA, quadB);
+	}
 
 	protected static (long refStart, long refEnd) LinkPoints(Navmesh nmesh, Vector3 startPos, Vector3 endPos, Navmesh.AreaId areaId = Navmesh.AreaId.ClientPath)
 	{
