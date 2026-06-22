@@ -222,7 +222,7 @@ source-level porting of `NavmeshRasterizer.cs`, `NavmeshBuilder.cs`,
 - LoS-based string-pull (Phase 1) is preferred over the half-written projection-funnel skeleton. Simpler, obviously correct (every segment is LoS-verified by construction), reuses tested `VoxelSearch.LineOfSight`. Produces slightly more waypoints than an ideal funnel (stops at last voxel before LoS breaks, not at the optimal face-crossing point) but still hits the 5-10x reduction target. A tighter funnel can be a follow-up if needed.
 - Fork manifest description explicitly notes "fork" and "drop-in IPC compatible" so users installing alongside upstream `vnavmesh` (same `InternalName`) get a clear choice. Same `InternalName` means they cannot coexist — by design.
 
-## PLAN2 — Custom pathfinding lib (in progress, 8/11 phases done)
+## PLAN2 — Custom pathfinding lib (DONE except in-game verification, 10/11 phases done)
 
 Replaces the aborted DotRecast rebase. The user chose to build a custom
 FFXIV-specialized pathfinding lib. Architecture: **quad graph for ground**
@@ -241,16 +241,13 @@ Plan file: `PLAN2.md` (1170 lines, 11 phases). Do NOT commit it.
 - Phase 6 (committed `6f5b227`): Spline smoothing (Catmull-Rom through waypoints). `Movement/SplineSmoothing.cs`. `FollowPath.Move` applies it when `Config.SplineSmoothing` and `waypoints.Count >= 2`. Config gains `SplineSmoothing` + `SplineSegments` slider.
 - Phase 7 (reverted, committed `608aec1`): **ABANDONED.** Turn-rate limiting caused stuck pathfinding at tight corners. FFXIV binary movement + the game's own instant direction snap (original vnavmesh behavior) is what works. All Phase 7 code removed (MaxTurnRateDeg, LastDt, azimuth clamp, ComputeMagnitude, config fields). `OverrideMovement` is back to original binary direction. Spline smoothing (Phase 6) remains as the only movement-quality layer.
 
-- Phase 8 (committed, pending): Rewrite `NavmeshQuery` for ground → quad graph. `PathfindMesh` routes through `_ground.Pathfind` when a ground graph exists, with DtNavMesh fallback. All public method signatures preserved (`PathfindMesh`, `FindNearestMeshPoly`, `FindIntersectingMeshPolys`, `FindNearestPointOnMeshPoly`, `FindNearestPointOnMesh`, `FindPointOnFloor`, `FindReachableMeshPolys`, `GetAreaId`). First phase where the quad graph (Phases 1-6) is actually used for ground pathfinding. Needs in-game verification.
+- Phase 9 (static verification only; in-game deferred to Phase 11): IPC surface byte-identical to Phase 0 (`git diff 8c8e484 -- vnavmesh/IPCProvider.cs` empty). All 31 IPC method delegate targets compile. No signature drift.
+- Phase 10 (committed `5748e22` + `7783fda` + `b6ab123`): Delete DotRecast + all dependent code. Ported 6 customizations (Z0155/Z0613/Z1237/Z1291/Z1310/Z1319) from LinkPoints to LinkQuads (10.0). Deleted entire Recast/Detour pipeline from NavmeshBuilder, NavmeshRasterizer, Navmesh.cs (Mesh field dropped, record now `(CustomizationVersion, QuadGraph? Ground, VoxelMap? Volume)`, Version 25->26), NavmeshCustomization (LinkPoints/CustomizeSettings/CustomizeMesh removed), NavmeshSettings (Recast/jump-link fields removed), NavmeshBitmap (RasterizePolygon takes Quad), NavmeshManager (BuildBitmap uses quad graph, Prune dropped), NavmeshQuery (pure quad-graph, no DtNavMesh fallback), Extensions (SystemToRecast/RecastToSystem removed). Deleted 10 Recast-only Debug files, created DebugQuadGraph. Removed DotRecast submodule + .gitmodules. Net -3407 lines. Build: 0 errors, 0 warnings (first time with zero warnings — DotRecast pre-existing warnings gone). `rg DotRecast vnavmesh/` -> 0. `rg DtNavMesh|RcHeightfield|...|SystemToRecast` -> 0.
 
 ### Remaining phases
 
-- Phase 9: Wire ground to quad graph + IPC verification (explicit end-to-end verification of all IPC methods with quad graph as ground data source).
-- Phase 10: Delete DotRecast + dependent code (submodule deinit, ~3500 lines, 9+ Debug files). Port remaining 6 customizations.
-- Phase 11: In-game verification + tuning + final audit.
+- Phase 11: In-game verification + tuning + final audit. This is the only remaining phase. All code is done; needs in-game testing of ground pathfinding on the quad graph, fly pathfinding on voxel A*, all 31 IPC methods, IPC consumers (SealHunter, Hunty, etc.) work unchanged.
 
-All committed phases build clean: 0 errors, 0 warnings. Phase 8 uncommitted
-but builds clean; needs commit + in-game verification (ground path in New
-Gridania / city with built ground graph; compare waypoint count/quality vs
-DotRecast; verify `Query.Mesh.NearestPoint`, `Query.Mesh.PointOnFloor`
-return sensible positions).
+All committed phases build clean: 0 errors, 0 warnings. DotRecast submodule
+is gone. The plugin is now a self-contained FFXIV pathfinding lib with no
+external navmesh dependencies.
