@@ -31,7 +31,7 @@ public static class FunnelStringPull
             {
                 var (p1, p2) = portal.Value;
                 var mid = (p1 + p2) * 0.5f;
-                var dir = toPos - fromPos;
+                var dir = graph.Quads[path[i + 1].quad].Center - graph.Quads[path[i].quad].Center;
                 var normal = new Vector3(-dir.Z, 0, dir.X);
                 if (normal.LengthSquared() < 1e-6f)
                     normal = new Vector3(0, 0, 1);

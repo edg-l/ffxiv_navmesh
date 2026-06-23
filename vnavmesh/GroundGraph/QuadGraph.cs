@@ -72,7 +72,7 @@ public class QuadGraph
         return quadA;
     }
 
-    public void BuildAdjacency(float maxClimb)
+    public void BuildAdjacency(float maxClimb, float agentRadius = 0f)
     {
         MaxClimb = maxClimb;
         for (int i = 0; i < Quads.Count; ++i)
@@ -85,7 +85,7 @@ public class QuadGraph
             for (int b = a + 1; b < Quads.Count; ++b)
             {
                 var qb = Quads[b];
-                if (TryFindSharedEdge(qa, qb, maxClimb, out var spanMin, out var spanMax, out var yFrom, out var yTo))
+                if (TryFindSharedEdge(qa, qb, maxClimb, agentRadius, out var spanMin, out var spanMax, out var yFrom, out var yTo))
                 {
                     Adjacency[a].Add(b);
                     Adjacency[b].Add(a);
@@ -95,7 +95,7 @@ public class QuadGraph
         }
     }
 
-    private static bool TryFindSharedEdge(Quad a, Quad b, float maxClimb, out Vector2 spanMin, out Vector2 spanMax, out float yFrom, out float yTo)
+    private static bool TryFindSharedEdge(Quad a, Quad b, float maxClimb, float agentRadius, out Vector2 spanMin, out Vector2 spanMax, out float yFrom, out float yTo)
     {
         spanMin = default;
         spanMax = default;
@@ -111,6 +111,7 @@ public class QuadGraph
             var zMax = MathF.Min(a.MaxZ, b.MaxZ);
             if (zMin < zMax)
             {
+                (zMin, zMax) = Inset(zMin, zMax, agentRadius);
                 spanMin = new(a.MaxX, zMin);
                 spanMax = new(a.MaxX, zMax);
                 return true;
@@ -122,6 +123,7 @@ public class QuadGraph
             var zMax = MathF.Min(a.MaxZ, b.MaxZ);
             if (zMin < zMax)
             {
+                (zMin, zMax) = Inset(zMin, zMax, agentRadius);
                 spanMin = new(a.MinX, zMin);
                 spanMax = new(a.MinX, zMax);
                 return true;
@@ -133,6 +135,7 @@ public class QuadGraph
             var xMax = MathF.Min(a.MaxX, b.MaxX);
             if (xMin < xMax)
             {
+                (xMin, xMax) = Inset(xMin, xMax, agentRadius);
                 spanMin = new(xMin, a.MaxZ);
                 spanMax = new(xMax, a.MaxZ);
                 return true;
@@ -144,6 +147,7 @@ public class QuadGraph
             var xMax = MathF.Min(a.MaxX, b.MaxX);
             if (xMin < xMax)
             {
+                (xMin, xMax) = Inset(xMin, xMax, agentRadius);
                 spanMin = new(xMin, a.MinZ);
                 spanMax = new(xMax, a.MinZ);
                 return true;
@@ -151,6 +155,22 @@ public class QuadGraph
         }
 
         return false;
+    }
+
+    // shrink a portal edge interval inward by the agent radius on both ends so the
+    // string-pulled path keeps its distance from the walls flanking the portal;
+    // collapse to the midpoint if the gap is narrower than the agent (FFXIV has tight
+    // doorways - keep them traversable rather than removing the portal entirely)
+    private static (float lo, float hi) Inset(float lo, float hi, float r)
+    {
+        if (r <= 0f)
+            return (lo, hi);
+        if (hi - lo <= 2f * r)
+        {
+            var mid = (lo + hi) * 0.5f;
+            return (mid, mid);
+        }
+        return (lo + r, hi - r);
     }
 
     public int NearestQuad(Vector3 p, float maxDist = float.MaxValue, bool allowUnreachable = true)

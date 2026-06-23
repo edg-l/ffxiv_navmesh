@@ -16,6 +16,8 @@ public readonly record struct Quad(float MinX, float MinY, float MinZ, float Max
 
 public static class QuadMesher
 {
+    private const float SurfaceYEps = 0.05f;
+
     public static QuadGraph GreedyMesh(VoxelMap volume, Vector3 boundsMin, Vector3 boundsMax)
     {
         var graph = new QuadGraph(boundsMin, boundsMax);
@@ -123,7 +125,7 @@ public static class QuadMesher
                 while (xEnd + 1 < totalCellsX
                        && !visited[(z * totalCellsX) + (xEnd + 1)]
                        && walkable[(z * totalCellsX) + (xEnd + 1)]
-                       && surfaceY[(z * totalCellsX) + (xEnd + 1)] == surfY
+                       && MathF.Abs(surfaceY[(z * totalCellsX) + (xEnd + 1)] - surfY) <= SurfaceYEps
                        && IsClearBetween(volume, origin, leafCellSize, xEnd, z, xEnd + 1, z, surfY))
                     ++xEnd;
 
@@ -289,9 +291,14 @@ public static class QuadMesher
         for (int x = xStart; x <= xEnd; ++x)
         {
             var idx = zTo * cellsX + x;
-            if (visited[idx] || !walkable[idx] || surfaceY[idx] != y)
+            if (visited[idx] || !walkable[idx] || MathF.Abs(surfaceY[idx] - y) > SurfaceYEps)
                 return false;
             if (!IsClearBetween(volume, origin, leafCellSize, x, zFrom, x, zTo, y))
+                return false;
+        }
+        for (int x = xStart; x < xEnd; ++x)
+        {
+            if (!IsClearBetween(volume, origin, leafCellSize, x, zTo, x + 1, zTo, y))
                 return false;
         }
         return true;
@@ -308,7 +315,7 @@ public static class QuadMesher
         {
             var edgeX = origin.X + (Math.Max(x1, x2)) * leafCellSize.X;
             var zCenter = origin.Z + (z1 + 0.5f) * leafCellSize.Z;
-            for (int i = -1; i <= 1; ++i)
+            for (int i = 0; i <= 1; ++i)
             {
                 var probe = new Vector3(edgeX, probeY + i * leafCellSize.Y, zCenter);
                 if (!volume.FindLeafVoxel(probe).empty)
@@ -320,7 +327,7 @@ public static class QuadMesher
         {
             var edgeZ = origin.Z + (Math.Max(z1, z2)) * leafCellSize.Z;
             var xCenter = origin.X + (x1 + 0.5f) * leafCellSize.X;
-            for (int i = -1; i <= 1; ++i)
+            for (int i = 0; i <= 1; ++i)
             {
                 var probe = new Vector3(xCenter, probeY + i * leafCellSize.Y, edgeZ);
                 if (!volume.FindLeafVoxel(probe).empty)

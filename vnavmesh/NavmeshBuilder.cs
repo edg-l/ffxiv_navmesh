@@ -136,7 +136,7 @@ public class NavmeshBuilder
             Navmesh = Navmesh with { Ground = QuadMesher.GreedyMesh(Navmesh.Volume, BoundsMin, BoundsMax) };
             var leafCellSize = Navmesh.Volume.Levels[^1].CellSize;
             var climbForAdjacency = MathF.Max(Settings.AgentMaxClimb, leafCellSize.Y * 1.5f);
-            Navmesh.Ground!.BuildAdjacency(climbForAdjacency);
+            Navmesh.Ground!.BuildAdjacency(climbForAdjacency, Settings.AgentRadius);
             Navmesh.Ground.InitFlags();
         }
     }
