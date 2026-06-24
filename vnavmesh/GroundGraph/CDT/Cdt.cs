@@ -382,9 +382,13 @@ public static class Cdt
             for (int ci = 0; ci < crossings.Count;)
             {
                 if (iter++ > maxIter)
-                    throw new InvalidOperationException(
-                        $"CDT EnforceConstraint exceeded iteration cap ({maxIter}) inserting segment ({va},{vb}); " +
-                        "degenerate input or non-terminating flip sequence.");
+                {
+                    // A non-terminating flip sequence on degenerate (grid-collinear/
+                    // cocircular) input. Skip this one constraint rather than killing
+                    // the whole build; a missing wall edge is recoverable.
+                    Service.Log.Warning($"CDT: constraint ({va},{vb}) flip sequence hit the iteration cap; skipping (one wall edge may be missing here).");
+                    return;
+                }
 
                 var (ea, eb) = crossings[ci];
                 int t = FindTriangleWithEdge(mesh, ea, eb, out int e);
