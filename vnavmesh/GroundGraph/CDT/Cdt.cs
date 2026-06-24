@@ -325,12 +325,40 @@ public static class Cdt
     //      continue, repeating until the list is empty.
     //   4. The edge (va,vb) must now exist: assert it and mark it constrained;
     //      throw if it does not (never silently mark a non-existent edge).
-    private static void EnforceConstraint(Mesh mesh, int va, int vb)
+    private static void EnforceConstraint(Mesh mesh, int va, int vb) => EnforceConstraint(mesh, va, vb, 0);
+
+    private static void EnforceConstraint(Mesh mesh, int va, int vb, int depth)
     {
+        if (va == vb)
+            return;
+
         // Already present?
         if (FindTriangleWithEdge(mesh, va, vb, out _) >= 0)
         {
             MarkConstrained(mesh, va, vb);
+            return;
+        }
+
+        // Recursion guard: each split strictly shortens the span (a distinct
+        // strictly-between vertex), so depth is bounded by the vertex count; the
+        // cap is a safety net against a tolerance-induced non-shrinking split.
+        if (depth > mesh.Verts.Count + 8)
+        {
+            Service.Log.Warning($"CDT: constraint ({va},{vb}) hit recursion cap; skipped (one wall edge may be missing here).");
+            return;
+        }
+
+        // A vertex lying ON the constraint segment makes (va,vb) unrealizable as a
+        // single edge — the wall genuinely passes through it. Split the constraint
+        // at that vertex and enforce each half (recursively handles multiple
+        // on-segment vertices). The strip walk reports such a vertex via its
+        // proper-cross test, which is robust to the float-noise that an exact
+        // Orient2D==0 collinearity check misses.
+        CollectCrossingEdges(mesh, va, vb, out int blocker);
+        if (blocker >= 0 && blocker != va && blocker != vb)
+        {
+            EnforceConstraint(mesh, va, blocker, depth + 1);
+            EnforceConstraint(mesh, blocker, vb, depth + 1);
             return;
         }
 
@@ -343,7 +371,7 @@ public static class Cdt
         //    crossing edge is left for a later sweep, where a neighbouring flip has
         //    made its quad convex. The list strictly shrinks once it is all-convex,
         //    guaranteeing termination.
-        var crossings = CollectCrossingEdges(mesh, va, vb);
+        var crossings = CollectCrossingEdges(mesh, va, vb, out _);
         var pa = mesh.Verts[va];
         var pb = mesh.Verts[vb];
         long maxIter = (long)(crossings.Count + 4) * (mesh.Tris.Count + 4) * 2 + 64;
@@ -413,10 +441,21 @@ public static class Cdt
         //    triangulation as-is (the exterior cull drops the zero-area pieces).
         if (FindTriangleWithEdge(mesh, va, vb, out _) < 0)
         {
-            if (HasVertexOnSegment(mesh, va, vb))
-                return; // degenerate collinear span: cannot realise; do not mark
-            throw new InvalidOperationException(
-                $"CDT EnforceConstraint failed to realise segment ({va},{vb}) as a mesh edge after flipping.");
+            // The flip sweep didn't realise (va,vb). If a vertex lies on/near the
+            // segment (tolerance-based, catching near-collinear cases the strip
+            // walk didn't flag), split there and recurse. Otherwise this is a
+            // genuine reflex/degenerate deadlock — skip this one constraint with a
+            // warning rather than killing the entire navmesh build (a single
+            // missing wall edge is recoverable; a failed build is not).
+            int vm = FindVertexOnOrNearSegment(mesh, va, vb);
+            if (vm >= 0)
+            {
+                EnforceConstraint(mesh, va, vm, depth + 1);
+                EnforceConstraint(mesh, vm, vb, depth + 1);
+                return;
+            }
+            Service.Log.Warning($"CDT: could not realise constraint ({va},{vb}); skipping (one wall edge may be missing here).");
+            return;
         }
 
         MarkConstrained(mesh, va, vb);
@@ -468,8 +507,9 @@ public static class Cdt
     // touching vb) is reached. Side tests use the robust Orient2D via
     // SegmentsProperlyCross. The returned pairs are captured by vertex index (not
     // triangle/edge slot) so they survive the mesh mutations that flipping causes.
-    private static List<(int a, int b)> CollectCrossingEdges(Mesh mesh, int va, int vb)
+    private static List<(int a, int b)> CollectCrossingEdges(Mesh mesh, int va, int vb, out int blockingVertex)
     {
+        blockingVertex = -1;
         var pa = mesh.Verts[va];
         var pb = mesh.Verts[vb];
         var crossings = new List<(int a, int b)>();
@@ -528,7 +568,18 @@ public static class Cdt
                 SegmentsProperlyCross(pa, pb, mesh.Verts[apex], mesh.Verts[cb]))
                 nextEdge = eApexCb;
             if (nextEdge < 0)
-                break; // segment passes through the apex vertex (collinear) or exits
+            {
+                // Neither sub-edge properly crosses: the segment runs through (or
+                // within float-noise of) the apex vertex. If the apex projects
+                // strictly between va and vb, it's an on-segment vertex that blocks
+                // (va,vb) from being a single edge — report it so the caller splits
+                // the constraint there. (Exact-zero Orient2D is too strict for real
+                // contour data, which is why the walk's proper-cross test, not a
+                // collinearity equality, is the authority here.)
+                if (IsStrictlyBetween(pa, pb, mesh.Verts[apex]))
+                    blockingVertex = apex;
+                break;
+            }
             curTri = nbr;
             curEdge = nextEdge;
         }
@@ -718,25 +769,44 @@ public static class Cdt
     // Is some real input vertex (other than va/vb) collinear with and strictly
     // between va and vb? Such a vertex makes segment (va,vb) unrepresentable as a
     // single triangulation edge (it would have to pass through that vertex).
-    private static bool HasVertexOnSegment(Mesh mesh, int va, int vb)
+    // True iff p projects strictly between pa and pb along the segment (parameter
+    // in (eps, 1-eps)). Used by the strip walk to decide whether a stalled apex is
+    // an on-segment blocker (vs the segment merely exiting the mesh).
+    private static bool IsStrictlyBetween(Vector2 pa, Vector2 pb, Vector2 p)
+    {
+        float dx = pb.X - pa.X, dy = pb.Y - pa.Y;
+        float denom = dx * dx + dy * dy;
+        if (denom <= 0f) return false;
+        float t = ((p.X - pa.X) * dx + (p.Y - pa.Y) * dy) / denom;
+        return t > 1e-4f && t < 1f - 1e-4f;
+    }
+
+    // Find an input vertex lying on or very near segment (va,vb) and projecting
+    // strictly between its endpoints, nearest to va. Tolerance-based (perpendicular
+    // distance), so it catches near-collinear contour vertices that an exact
+    // Orient2D==0 test misses. Returns -1 if none.
+    private static int FindVertexOnOrNearSegment(Mesh mesh, int va, int vb)
     {
         var pa = mesh.Verts[va];
         var pb = mesh.Verts[vb];
+        float dx = pb.X - pa.X, dy = pb.Y - pa.Y;
+        float denom = dx * dx + dy * dy;
+        if (denom <= 0f) return -1;
+        const float perpEps = 1e-2f; // world units (~1/25 of a 0.25y cell)
+        int best = -1;
+        float bestT = float.MaxValue;
         for (int v = 0; v < mesh.Verts.Count; v++)
         {
             if (v == va || v == vb) continue;
             var p = mesh.Verts[v];
-            if (Predicates.Orient2D(pa, pb, p) != 0)
-                continue; // not collinear
-            // Strictly between (projection parameter in (0,1)).
-            float dx = pb.X - pa.X, dy = pb.Y - pa.Y;
-            float denom = dx * dx + dy * dy;
-            if (denom <= 0f) continue;
-            float tparam = ((p.X - pa.X) * dx + (p.Y - pa.Y) * dy) / denom;
-            if (tparam > 1e-6f && tparam < 1f - 1e-6f)
-                return true;
+            float t = ((p.X - pa.X) * dx + (p.Y - pa.Y) * dy) / denom;
+            if (t <= 1e-4f || t >= 1f - 1e-4f) continue;
+            float projX = pa.X + dx * t, projY = pa.Y + dy * t;
+            float ex = p.X - projX, ey = p.Y - projY;
+            if (ex * ex + ey * ey > perpEps * perpEps) continue;
+            if (t < bestT) { bestT = t; best = v; }
         }
-        return false;
+        return best;
     }
 
     // Proper segment crossing (interiors intersect). Endpoints touching do NOT

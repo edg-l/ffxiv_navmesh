@@ -49,6 +49,33 @@ public class CdtTests : IClassFixture<ServiceFixture>
     }
 
     [Fact]
+    public void ConstraintThroughInteriorVertices_SplitNotThrow()
+    {
+        // Regression for the in-game Limsa failure: a constraint segment passes
+        // EXACTLY through other input vertices (cross-contour collinearity).
+        // Verts 4 and 5 lie on constraint edge (0,1); the enforcer must split it
+        // into (0,4),(4,5),(5,1) and recurse, not throw / kill the build.
+        var verts = new List<Vector2>
+        {
+            new(0, 0), new(10, 0), new(10, 10), new(0, 10), // rectangle 0..3
+            new(3, 0), new(7, 0),                            // on segment (0,1)
+            new(5, 5),                                       // interior filler
+        };
+        var constraints = new List<Cdt.Constraint>
+        {
+            new(0, 1), new(1, 2), new(2, 3), new(3, 0),
+        };
+        var loops = new List<List<int>> { new() { 0, 1, 2, 3 } };
+
+        var result = Cdt.Triangulate(verts, constraints, loops);
+        Assert.NotNull(result);
+        AssertValid(result!);
+        AssertWatertight(result!);
+        // The bottom constraint must be realised as the split chain 0-4-5-1.
+        AssertConstraintsPresent(result!, new List<Cdt.Constraint> { new(0, 4), new(4, 5), new(5, 1) });
+    }
+
+    [Fact]
     public void SquareWithHole_ValidTriangulation()
     {
         // Outer 0..3, inner hole 4..7 (CW so it's a hole).
