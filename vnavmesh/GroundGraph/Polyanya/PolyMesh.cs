@@ -101,6 +101,22 @@ public class PolyMesh
         // Per quad: boundary vertex indices in CCW order starting at (MinX,MinZ).
         var quadBoundary = new List<int>[g.Quads.Count];
 
+        // Bucket non-off-mesh portals by the quads they touch ONCE up front so the
+        // per-quad loop reads only its own portals. Scanning all portals per quad
+        // was O(quads*portals) (~30B on a 116k-quad / 264k-portal mesh) and
+        // effectively hung the first Pathfind.
+        var portalsByQuad = new List<Portal>[g.Quads.Count];
+        for (int i = 0; i < portalsByQuad.Length; i++)
+            portalsByQuad[i] = new();
+        foreach (var p in g.Portals)
+        {
+            if (p.IsOffMesh) continue;
+            if (p.FromQuad >= 0 && p.FromQuad < portalsByQuad.Length)
+                portalsByQuad[p.FromQuad].Add(p);
+            if (p.ToQuad >= 0 && p.ToQuad < portalsByQuad.Length && p.ToQuad != p.FromQuad)
+                portalsByQuad[p.ToQuad].Add(p);
+        }
+
         for (int qi = 0; qi < g.Quads.Count; qi++)
         {
             var q = g.Quads[qi];
@@ -112,10 +128,8 @@ public class PolyMesh
             // side of THIS quad.
             var sidePortals = new List<(float lo, float hi, Portal portal)>[4];
             for (int s = 0; s < 4; s++) sidePortals[s] = new();
-            foreach (var p in g.Portals)
+            foreach (var p in portalsByQuad[qi])
             {
-                if (p.IsOffMesh) continue;
-                if (p.FromQuad != qi && p.ToQuad != qi) continue;
                 int side = QuadSideForPortal(q, p);
                 if (side < 0) continue;
                 // Parametrize the portal span along the side's primary axis.

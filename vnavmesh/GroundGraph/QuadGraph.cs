@@ -87,19 +87,99 @@ public class QuadGraph
             Adjacency[i].Clear();
         Portals.Clear();
 
-        for (int a = 0; a < Quads.Count; ++a)
+        // Two axis-aligned quads share an edge only if one's forward edge sits on
+        // the same line as the other's backward edge AND their extents overlap on
+        // the perpendicular axis. Bucket edges by quantized coordinate so only
+        // quads on the same edge line are compared, then sweep the overlap axis.
+        // (Was O(n^2) all-pairs: ~6.7B comparisons on a 116k-quad mesh.)
+        int n = Quads.Count;
+        var rightX = new Dictionary<int, List<int>>();  // quads by MaxX (right edge)
+        var leftX = new Dictionary<int, List<int>>();   // quads by MinX (left edge)
+        var topZ = new Dictionary<int, List<int>>();    // quads by MaxZ (far edge)
+        var botZ = new Dictionary<int, List<int>>();    // quads by MinZ (near edge)
+        for (int i = 0; i < n; ++i)
         {
-            var qa = Quads[a];
-            for (int b = a + 1; b < Quads.Count; ++b)
+            var q = Quads[i];
+            BucketAdd(rightX, EdgeKey(q.MaxX), i);
+            BucketAdd(leftX, EdgeKey(q.MinX), i);
+            BucketAdd(topZ, EdgeKey(q.MaxZ), i);
+            BucketAdd(botZ, EdgeKey(q.MinZ), i);
+        }
+        // Vertical shared edges (a.MaxX == b.MinX): overlap on Z.
+        foreach (var (k, r) in rightX)
+            if (leftX.TryGetValue(k, out var l))
+                ConnectOverlapping(r, l, vertical: true, maxClimb, agentRadius);
+        // Horizontal shared edges (a.MaxZ == b.MinZ): overlap on X.
+        foreach (var (k, t) in topZ)
+            if (botZ.TryGetValue(k, out var b))
+                ConnectOverlapping(t, b, vertical: false, maxClimb, agentRadius);
+    }
+
+    // Quantize an edge coordinate to a bucket key. Greedy-mesh quad edges are
+    // multiples of CellSize (0.25); a 0.05 quantum collides only truly-equal
+    // edges (5 buckets apart per cell) while absorbing float error.
+    private static int EdgeKey(float v) => (int)MathF.Round(v * 20f);
+
+    private static void BucketAdd(Dictionary<int, List<int>> d, int key, int idx)
+    {
+        if (!d.TryGetValue(key, out var list))
+            d[key] = list = new();
+        list.Add(idx);
+    }
+
+    // setA = quads whose forward edge lies on this line; setB = quads whose
+    // backward edge lies on it. Sweep the perpendicular axis to find overlapping
+    // (a, b) pairs, validating each via TryFindSharedEdge. Greedy quads on one
+    // side tile the axis disjointly, so the active sets stay tiny ⇒ near-linear.
+    private void ConnectOverlapping(List<int> setA, List<int> setB, bool vertical, float maxClimb, float agentRadius)
+    {
+        var events = new List<(float coord, int kind, int idx)>((setA.Count + setB.Count) * 2);
+        foreach (var a in setA)
+        {
+            var q = Quads[a];
+            float lo = vertical ? q.MinZ : q.MinX, hi = vertical ? q.MaxZ : q.MaxX;
+            events.Add((lo, 0, a));
+            events.Add((hi, 2, a));
+        }
+        foreach (var b in setB)
+        {
+            var q = Quads[b];
+            float lo = vertical ? q.MinZ : q.MinX, hi = vertical ? q.MaxZ : q.MaxX;
+            events.Add((lo, 1, b));
+            events.Add((hi, 3, b));
+        }
+        // Starts (0,1) before ends (2,3) at equal coord; TryFindSharedEdge filters
+        // zero-overlap (touching) pairs via its strict lo<hi check.
+        events.Sort((u, v) => u.coord != v.coord ? u.coord.CompareTo(v.coord) : u.kind.CompareTo(v.kind));
+        var activeA = new List<int>();
+        var activeB = new List<int>();
+        foreach (var (_, kind, idx) in events)
+        {
+            switch (kind)
             {
-                var qb = Quads[b];
-                if (TryFindSharedEdge(qa, qb, maxClimb, agentRadius, out var spanMin, out var spanMax, out var yFrom, out var yTo))
-                {
-                    Adjacency[a].Add(b);
-                    Adjacency[b].Add(a);
-                    Portals.Add(new Portal(a, b, spanMin, spanMax, yFrom, yTo, false, Navmesh.AreaId.Default));
-                }
+                case 0:
+                    foreach (var b in activeB) TryConnect(idx, b, maxClimb, agentRadius);
+                    activeA.Add(idx);
+                    break;
+                case 1:
+                    foreach (var a in activeA) TryConnect(a, idx, maxClimb, agentRadius);
+                    activeB.Add(idx);
+                    break;
+                case 2: activeA.Remove(idx); break;
+                case 3: activeB.Remove(idx); break;
             }
+        }
+    }
+
+    private void TryConnect(int a, int b, float maxClimb, float agentRadius)
+    {
+        if (a == b)
+            return;
+        if (TryFindSharedEdge(Quads[a], Quads[b], maxClimb, agentRadius, out var spanMin, out var spanMax, out var yFrom, out var yTo))
+        {
+            Adjacency[a].Add(b);
+            Adjacency[b].Add(a);
+            Portals.Add(new Portal(a, b, spanMin, spanMax, yFrom, yTo, false, Navmesh.AreaId.Default));
         }
     }
 

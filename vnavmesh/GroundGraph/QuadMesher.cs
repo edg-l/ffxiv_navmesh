@@ -16,7 +16,13 @@ public readonly record struct Quad(float MinX, float MinY, float MinZ, float Max
 
 public static class QuadMesher
 {
-    private const float SurfaceYEps = 0.05f;
+    // Merge tolerance for greedy strips. Floors rasterize to Y quantized in
+    // CellHeight (0.25) steps, so a flat surface with sub-cell slope alternates
+    // between adjacent 0.25 levels; a tolerance below 0.25 refuses to merge them
+    // and shatters flat areas into per-cell quads (116k+ on a city zone). 0.3
+    // (slightly over one step) lets co-planar cells merge while still splitting
+    // genuine ledges. Layer partitioning still separates real height regions.
+    private const float SurfaceYEps = 0.3f;
 
     // Build a QuadGraph from a merged CompactHeightfield (fine 0.25y data).
     // Each layer is meshed independently; within-climb seam boundaries between
