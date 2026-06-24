@@ -636,6 +636,12 @@ public class PolyanyaSearch
                     if (dy < bestNearestDY) { bestNearestDY = dy; nearest = i; }
                 }
                 if (contains >= 0) return contains;
+                // The quad-hint candidate(s) did not geometrically contain p (CDT
+                // face AABBs overlap neighbours, so NearestQuad can resolve to a
+                // face that does not cover p). Try the full geometric scan before
+                // falling back to the nearest-by-floor-Y face.
+                int geom = FindFaceContaining(p, y);
+                if (geom >= 0) return geom;
                 if (nearest >= 0) return nearest;
             }
         }
@@ -653,6 +659,8 @@ public class PolyanyaSearch
                 if (dy < bestNearestDY) { bestNearestDY = dy; nearest = i; }
             }
             if (contains >= 0) return contains;
+            int geomScan = FindFaceContaining(p, y);
+            if (geomScan >= 0) return geomScan;
             if (nearest >= 0) return nearest;
         }
         return FindFaceContaining(p, y);
@@ -677,6 +685,11 @@ public class PolyanyaSearch
                     if (dy < bestNearestDY) { bestNearestDY = dy; nearest = i; }
                 }
                 if (contains >= 0) return contains;
+                // Quad-hint candidate(s) did not geometrically contain p: try the
+                // full geometric scan before accepting the nearest-by-floor-Y face
+                // (CDT face AABBs overlap, so NearestQuad can mis-resolve).
+                int geom = FindFaceContaining(p, y);
+                if (geom >= 0) return geom;
                 if (nearest >= 0) return nearest;
             }
         }
@@ -693,6 +706,8 @@ public class PolyanyaSearch
                 if (dy < bestNearestDY) { bestNearestDY = dy; nearest = i; }
             }
             if (contains >= 0) return contains;
+            int geomScan = FindFaceContaining(p, y);
+            if (geomScan >= 0) return geomScan;
             if (nearest >= 0) return nearest;
         }
         // No quad hint: geometric fallback.

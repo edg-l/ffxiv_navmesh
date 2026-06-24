@@ -23,6 +23,14 @@ public class QuadGraph
     // long as Quads/Portals/Adjacency don't change.
     private PolyMesh? _cachedPolyMesh;
 
+    // Phase 4: when set (Config.UseCdtMesh==true), Pathfind uses this prebuilt
+    // triangle PolyMesh directly instead of deriving one from the quads via
+    // PolyMesh.FromQuadGraph. The QuadGraph's Quads/Adjacency/Flags still exist
+    // (one AABB quad per CDT face) so NearestQuad / FloodReachable / IPC poly
+    // handles keep working unchanged; face id == quad id == SourceQuad/layer
+    // lookup via FacesByQuad.
+    public PolyMesh? PrebuiltMesh;
+
     // C3: lazily-built uniform-grid spatial index for NearestQuad. Cell size ~4
     // yalms gives a good balance for FFXIV zones (quads are typically 0.25–8 y wide).
     private const float SpatialGridCell = 4f;
@@ -84,6 +92,64 @@ public class QuadGraph
             Adjacency[quadB].Add(quadA);
         }
         return quadA;
+    }
+
+    // Phase 4 (Config.UseCdtMesh): adopt a prebuilt triangle PolyMesh as the
+    // ground backend. One AABB quad is created per CDT face (quad id == face id ==
+    // SourceQuad/FacesByQuad index) so NearestQuad / FloodReachable /
+    // ApplyReachable / the opaque IPC poly handles all keep working unchanged.
+    // Adjacency is derived from the triangle edge graph (interior non-obstacle
+    // edges) plus off-mesh links, so reachability flooding is over the face graph.
+    public void SetCdtMesh(PolyMesh mesh)
+    {
+        PrebuiltMesh = mesh;
+        _cachedPolyMesh = null;
+        _spatialGrid = null;
+        Quads.Clear();
+        Adjacency.Clear();
+        Portals.Clear();
+
+        // One AABB quad per face; MinY == MaxY == face.Y. Quad id == face id.
+        for (int f = 0; f < mesh.Faces.Count; f++)
+        {
+            var face = mesh.Faces[f];
+            var v0 = mesh.Vertices[face.V0];
+            var v1 = mesh.Vertices[face.V1];
+            var v2 = mesh.Vertices[face.V2];
+            float minX = MathF.Min(v0.X, MathF.Min(v1.X, v2.X));
+            float maxX = MathF.Max(v0.X, MathF.Max(v1.X, v2.X));
+            float minZ = MathF.Min(v0.Z, MathF.Min(v1.Z, v2.Z));
+            float maxZ = MathF.Max(v0.Z, MathF.Max(v1.Z, v2.Z));
+            AddQuad(new Quad(minX, face.Y, minZ, maxX, face.Y, maxZ, Navmesh.AreaId.Default));
+        }
+
+        // Adjacency from interior triangle edges (bilateral, non-obstacle).
+        for (int f = 0; f < mesh.Faces.Count; f++)
+        {
+            for (int e = 0; e < 3; e++)
+            {
+                var edge = mesh.Edges[f * 3 + e];
+                int nbr = edge.FaceRight;
+                if (nbr >= 0 && nbr != f && !edge.IsObstacleEdge)
+                {
+                    if (!Adjacency[f].Contains(nbr))
+                        Adjacency[f].Add(nbr);
+                }
+            }
+        }
+
+        // Off-mesh links → adjacency + portal records (so FloodReachable crosses
+        // them and they survive the off-mesh snapshot in BuildAdjacency).
+        foreach (var link in mesh.OffMeshLinks)
+        {
+            if (link.FromFace < 0 || link.FromFace >= Quads.Count) continue;
+            if (link.ToFace < 0 || link.ToFace >= Quads.Count) continue;
+            if (!Adjacency[link.FromFace].Contains(link.ToFace))
+                Adjacency[link.FromFace].Add(link.ToFace);
+            Portals.Add(new Portal(link.FromFace, link.ToFace,
+                new Vector2(link.FromPos.X, link.FromPos.Z), new Vector2(link.FromPos.X, link.FromPos.Z),
+                link.FromPos.Y, link.ToPos.Y, true, link.Area));
+        }
     }
 
     public void BuildAdjacency(float maxClimb, float agentRadius = 0f)
@@ -505,7 +571,7 @@ public class QuadGraph
         // supersedes raycast shortcutting. range semantics are forwarded to
         // PolyanyaSearch (range>0 terminates within range of goal; range==0
         // = exact goal).
-        var mesh = _cachedPolyMesh ??= PolyMesh.FromQuadGraph(this);
+        var mesh = PrebuiltMesh ?? (_cachedPolyMesh ??= PolyMesh.FromQuadGraph(this));
         var search = new PolyanyaSearch(mesh);
         if (Flags.Length > 0)
             search.SetQuadFlags(Flags, FLAG_UNREACHABLE);

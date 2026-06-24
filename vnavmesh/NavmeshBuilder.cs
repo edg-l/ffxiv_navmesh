@@ -138,12 +138,29 @@ public class NavmeshBuilder
             // multi-GB allocation. The border strip of each tile CHF is dropped
             // inside MeshInto so tiles tile cleanly.
             var ground = new QuadGraph(BoundsMin, BoundsMax);
-            foreach (var (chf, _, _) in tileCHFs)
-                QuadMesher.MeshInto(ground, chf);
-            Navmesh = Navmesh with { Ground = ground };
-            ground.BuildAdjacency(Settings.AgentMaxClimb, Settings.AgentRadius);
-            ground.InitFlags();
-            Service.Log.Debug($"[ground] quad graph: {ground.Count} quads, {ground.Portals.Count} portals (per-tile mesh, {tileCHFs.Count} tiles)");
+            if (Service.Config.UseCdtMesh)
+            {
+                // Phase 4: per-layer Constrained Delaunay Triangulation from the
+                // Phase-3 contours, merged across tiles into one triangle PolyMesh.
+                var chfs = new List<CompactHeightfield>(tileCHFs.Count);
+                foreach (var (chf, _, _) in tileCHFs)
+                    chfs.Add(chf);
+                var cdtMesh = GroundGraph.CDT.CdtMeshBuilder.BuildMerged(chfs);
+                ground.MaxClimb = Settings.AgentMaxClimb;
+                ground.SetCdtMesh(cdtMesh);
+                ground.InitFlags();
+                Navmesh = Navmesh with { Ground = ground };
+                Service.Log.Debug($"[ground] CDT mesh: {cdtMesh.Faces.Count} faces, {cdtMesh.Vertices.Count} verts, {cdtMesh.OffMeshLinks.Count} off-mesh links ({tileCHFs.Count} tiles)");
+            }
+            else
+            {
+                foreach (var (chf, _, _) in tileCHFs)
+                    QuadMesher.MeshInto(ground, chf);
+                Navmesh = Navmesh with { Ground = ground };
+                ground.BuildAdjacency(Settings.AgentMaxClimb, Settings.AgentRadius);
+                ground.InitFlags();
+                Service.Log.Debug($"[ground] quad graph: {ground.Count} quads, {ground.Portals.Count} portals (per-tile mesh, {tileCHFs.Count} tiles)");
+            }
         }
     }
 

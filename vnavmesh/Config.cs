@@ -1,6 +1,7 @@
 ﻿using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Components;
 using Dalamud.Interface.Utility.Raii;
+using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using System;
 using System.IO;
@@ -26,6 +27,16 @@ public class Config
     public bool SplineSmoothing = true;
     public int SplineSegments = 8;
     public int BuildMaxCores = 1;
+
+    // Phase 4 (gated, reversible): build the ground mesh as a per-layer
+    // Constrained Delaunay Triangulation from the Phase-3 contours instead of the
+    // greedy-quad path. Code default only; explicitly NOT serialized
+    // ([JsonIgnore]) so it never persists into a user's config payload.
+    // Flip criterion met (Phase 4 checkpoint): all CdtTests validity + fuzz pass
+    // AND CoverageRegressionTests show CDT coverage >= greedy-quad coverage on all
+    // 6 synthetic scenes, so the committed default is CDT-on.
+    [JsonIgnore]
+    public bool UseCdtMesh = true;
 
     // TEMP-DEVLOG: live metric uploader for in-game Polyanya testing. Remove when done.
     public bool DevLog = false;

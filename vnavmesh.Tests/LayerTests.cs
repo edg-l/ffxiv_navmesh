@@ -203,11 +203,11 @@ public class LayerTests : IClassFixture<ServiceFixture>
     }
 
     // Task 3.8 round-trip: serialize a QuadGraph with off-mesh links and verify it
-    // deserializes to the same data. Also asserts Navmesh.Version == 28.
+    // deserializes to the same data. Also asserts Navmesh.Version == 29 (Phase 4).
     [Fact]
-    public void NavmeshVersion_Is28()
+    public void NavmeshVersion_Is29()
     {
-        Assert.Equal(28u, Navmesh.Version);
+        Assert.Equal(29u, Navmesh.Version);
     }
 
     [Fact]

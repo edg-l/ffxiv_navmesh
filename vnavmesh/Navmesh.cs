@@ -15,7 +15,7 @@ namespace Navmesh;
 public record class Navmesh(int CustomizationVersion, QuadGraph? Ground, VoxelMap? Volume)
 {
 	public static readonly uint Magic = 0x444D564E; // 'NVMD'
-	public static readonly uint Version = 28;
+	public static readonly uint Version = 29;
 	public const int FLAG_UNREACHABLE = 0x10;
 
 	[Flags]
@@ -131,6 +131,18 @@ public record class Navmesh(int CustomizationVersion, QuadGraph? Ground, VoxelMa
 			for (int i = 0; i < flagsCount; ++i)
 				graph.Flags[i] = reader.ReadInt32();
 
+			// Phase 4: optional prebuilt CDT triangle PolyMesh (Config.UseCdtMesh).
+			var hasCdtMesh = reader.ReadBoolean();
+			if (hasCdtMesh)
+			{
+				var mesh = DeserializeCdtMesh(reader);
+				// Rebuild the face-AABB wrapper (quads/adjacency) deterministically
+				// from the mesh; the persisted Flags above stay authoritative.
+				var savedFlags = graph.Flags;
+				graph.SetCdtMesh(mesh);
+				graph.Flags = savedFlags;
+			}
+
 			return graph;
 		}
 		catch (EndOfStreamException)
@@ -172,6 +184,98 @@ public record class Navmesh(int CustomizationVersion, QuadGraph? Ground, VoxelMa
 		writer.Write(graph.Flags.Length);
 		foreach (var f in graph.Flags)
 			writer.Write(f);
+
+		// Phase 4: optional prebuilt CDT triangle PolyMesh (Config.UseCdtMesh).
+		if (graph.PrebuiltMesh == null)
+		{
+			writer.Write(false);
+		}
+		else
+		{
+			writer.Write(true);
+			SerializeCdtMesh(writer, graph.PrebuiltMesh);
+		}
+	}
+
+	private static void SerializeCdtMesh(BinaryWriter writer, GroundGraph.Polyanya.PolyMesh mesh)
+	{
+		writer.Write(mesh.Vertices.Count);
+		foreach (var v in mesh.Vertices)
+			SerializeVector3(writer, v);
+
+		writer.Write(mesh.Faces.Count);
+		foreach (var f in mesh.Faces)
+		{
+			writer.Write(f.V0); writer.Write(f.V1); writer.Write(f.V2);
+			writer.Write(f.Y); writer.Write(f.Layer);
+		}
+		// SourceQuad per face.
+		foreach (var sq in mesh.SourceQuad)
+			writer.Write(sq);
+
+		// Edges: 3 per face, in face*3+edge order.
+		writer.Write(mesh.Edges.Count);
+		foreach (var e in mesh.Edges)
+		{
+			writer.Write(e.FaceLeft); writer.Write(e.FaceRight); writer.Write(e.IsObstacleEdge);
+		}
+
+		writer.Write(mesh.OffMeshLinks.Count);
+		foreach (var l in mesh.OffMeshLinks)
+		{
+			writer.Write(l.FromFace); writer.Write(l.ToFace);
+			SerializeVector3(writer, l.FromPos);
+			SerializeVector3(writer, l.ToPos);
+			writer.Write((byte)l.Area);
+		}
+	}
+
+	private static GroundGraph.Polyanya.PolyMesh DeserializeCdtMesh(BinaryReader reader)
+	{
+		var mesh = new GroundGraph.Polyanya.PolyMesh();
+
+		var vertCount = reader.ReadInt32();
+		for (int i = 0; i < vertCount; ++i)
+			mesh.Vertices.Add(DeserializeVector3(reader));
+
+		var faceCount = reader.ReadInt32();
+		for (int i = 0; i < faceCount; ++i)
+		{
+			int v0 = reader.ReadInt32(), v1 = reader.ReadInt32(), v2 = reader.ReadInt32();
+			float y = reader.ReadSingle();
+			int layer = reader.ReadInt32();
+			mesh.Faces.Add(new GroundGraph.Polyanya.TriFace(v0, v1, v2, y, layer));
+			mesh.SourceQuad.Add(-1);
+		}
+		for (int i = 0; i < faceCount; ++i)
+			mesh.SourceQuad[i] = reader.ReadInt32();
+
+		var edgeCount = reader.ReadInt32();
+		for (int i = 0; i < edgeCount; ++i)
+		{
+			int fl = reader.ReadInt32(), fr = reader.ReadInt32();
+			bool obs = reader.ReadBoolean();
+			mesh.Edges.Add(new GroundGraph.Polyanya.TriEdge(fl, fr, obs));
+		}
+
+		var linkCount = reader.ReadInt32();
+		for (int i = 0; i < linkCount; ++i)
+		{
+			int from = reader.ReadInt32(), to = reader.ReadInt32();
+			var fromPos = DeserializeVector3(reader);
+			var toPos = DeserializeVector3(reader);
+			var area = (AreaId)reader.ReadByte();
+			mesh.OffMeshLinks.Add(new GroundGraph.Polyanya.OffMeshLink(from, to, fromPos, toPos, area));
+		}
+
+		// Rebuild the face-id FacesByQuad index (identity) so PolyanyaSearch can
+		// resolve start/goal faces; SetCdtMesh on the graph rebuilds quads/adjacency.
+		var facesByQuad = new System.Collections.Generic.List<int>[mesh.Faces.Count];
+		for (int f = 0; f < mesh.Faces.Count; ++f)
+			facesByQuad[f] = new System.Collections.Generic.List<int> { f };
+		mesh.FacesByQuad = facesByQuad;
+
+		return mesh;
 	}
 
 	private static unsafe void DeserializeVolumeTile(BinaryReader reader, VoxelMap.Tile tile)
