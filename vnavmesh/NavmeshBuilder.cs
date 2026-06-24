@@ -112,7 +112,7 @@ public class NavmeshBuilder
         }
     }
 
-    public void BuildTiles(Action? onTileFinished = null)
+    public void BuildTiles(Action? onTileFinished = null, CancellationToken cancel = default)
     {
         var timings = new BuildTimings();
         var swTotal = System.Diagnostics.Stopwatch.StartNew();
@@ -138,7 +138,7 @@ public class NavmeshBuilder
             for (int x = 0; x < NumTilesX; x++)
                 tileCoords.Add((x, z));
 
-        var options = new ParallelOptions { MaxDegreeOfParallelism = threadCount };
+        var options = new ParallelOptions { MaxDegreeOfParallelism = threadCount, CancellationToken = cancel };
         sw.Restart();
         Parallel.ForEach(tileCoords, options, coord =>
         {
@@ -188,7 +188,7 @@ public class NavmeshBuilder
                 foreach (var (chf, _, _) in tileCHFs)
                     chfs.Add(chf);
                 sw.Restart();
-                var cdtMesh = GroundGraph.CDT.CdtMeshBuilder.BuildMerged(chfs);
+                var cdtMesh = GroundGraph.CDT.CdtMeshBuilder.BuildMerged(chfs, cancel);
                 timings.GroundMesh = sw.Elapsed;
                 ground.MaxClimb = Settings.AgentMaxClimb;
                 ground.SetCdtMesh(cdtMesh);
@@ -200,7 +200,10 @@ public class NavmeshBuilder
             {
                 sw.Restart();
                 foreach (var (chf, _, _) in tileCHFs)
+                {
+                    cancel.ThrowIfCancellationRequested();
                     QuadMesher.MeshInto(ground, chf);
+                }
                 timings.GroundMesh = sw.Elapsed;
                 Navmesh = Navmesh with { Ground = ground };
                 sw.Restart();

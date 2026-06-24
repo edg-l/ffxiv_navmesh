@@ -122,6 +122,12 @@ public sealed class NavmeshManager : IDisposable
 		return true;
 	}
 
+	// Cancel an in-progress load/build. Signals the current build's token; the
+	// build loop (tile rasterization + CDT phase) checks it and throws
+	// OperationCanceledException, which the task chain swallows and resets
+	// progress. Safe to call when nothing is building (no-op).
+	public void CancelBuild() => _currentCTS?.Cancel();
+
 	internal void ReplaceMesh(Navmesh mesh)
 	{
 		Navmesh = mesh;
@@ -326,7 +332,7 @@ public sealed class NavmeshManager : IDisposable
 		{
 			_loadTaskProgress += deltaProgress;
 			cancel.ThrowIfCancellationRequested();
-		});
+		}, cancel);
 
 		// write results to cache
 		{

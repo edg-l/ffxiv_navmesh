@@ -45,6 +45,14 @@ class DebugNavmeshManager : IDisposable
 		if (progress >= 0)
 		{
 			ImGui.ProgressBar(progress, new Vector2(200, 0));
+			ImGui.SameLine();
+			if (ImGui.Button("Cancel build"))
+				_manager.CancelBuild();
+			ImGui.SameLine();
+			// Export works while a build is running/hung — it extracts the raw
+			// scene directly and never triggers or waits on the build.
+			if (ImGui.Button("[dev] Export scene"))
+				_manager.ExportSceneCapture();
 		}
 		else
 		{

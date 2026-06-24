@@ -32,7 +32,7 @@ public static class CdtMeshBuilder
     // Build the combined PolyMesh from a merged CompactHeightfield. Mirrors the
     // greedy path's MeshInto: partition into layers, mesh each, wire inter-layer
     // links.
-    public static PolyMesh Build(CompactHeightfield chf)
+    public static PolyMesh Build(CompactHeightfield chf, System.Threading.CancellationToken cancel = default)
     {
         var partition = LayerPartition.Partition(chf);
         var mesh = new PolyMesh();
@@ -46,6 +46,7 @@ public static class CdtMeshBuilder
 
         for (int layerId = 0; layerId < partition.NumLayers; layerId++)
         {
+            cancel.ThrowIfCancellationRequested();
             float floorY = LayerFloorY(partition, layerId);
             layerY[layerId] = floorY;
             BuildLayer(chf, partition, layerId, floorY, mesh, facesByLayer[layerId]);
@@ -83,7 +84,7 @@ public static class CdtMeshBuilder
     // globally-welded border vertices so WireAdjacency reconnects faces across
     // tile seams. Mirrors the greedy path's per-tile MeshInto + cross-tile
     // BuildAdjacency, without materializing a full-zone fine grid.
-    public static PolyMesh BuildMerged(IReadOnlyList<CompactHeightfield> tiles)
+    public static PolyMesh BuildMerged(IReadOnlyList<CompactHeightfield> tiles, System.Threading.CancellationToken cancel = default)
     {
         var combined = new PolyMesh();
         // Global vertex weld map so coincident border vertices from adjacent tiles
@@ -98,7 +99,8 @@ public static class CdtMeshBuilder
         int tileId = 0;
         foreach (var chf in tiles)
         {
-            var tileMesh = Build(chf);
+            cancel.ThrowIfCancellationRequested();
+            var tileMesh = Build(chf, cancel);
             int faceOffset = combined.Faces.Count;
             // Remap this tile's vertices into the combined mesh (welded).
             var vmap = new int[tileMesh.Vertices.Count];
