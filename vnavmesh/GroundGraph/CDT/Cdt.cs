@@ -374,7 +374,12 @@ public static class Cdt
         var crossings = CollectCrossingEdges(mesh, va, vb, out _);
         var pa = mesh.Verts[va];
         var pb = mesh.Verts[vb];
-        long maxIter = (long)(crossings.Count + 4) * (mesh.Tris.Count + 4) * 2 + 64;
+        // A valid Anglada insertion resolves the strip in O(crossings^2) flips
+        // (each sweep flips >=1; the list shrinks). Bound the cap by the STRIP
+        // length, NOT mesh.Tris.Count — the latter made a 4-edge strip burn ~18k
+        // iterations on a 1000-triangle tile before bailing, stalling the build.
+        long sc = crossings.Count + 8;
+        long maxIter = sc * sc + 64;
         long iter = 0;
         while (crossings.Count > 0)
         {
