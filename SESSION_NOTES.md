@@ -363,9 +363,68 @@ face selection).
 - Confirm ledges/walls still block (over-climb seams stayed walls, not links).
 - Synthetic fuzz is a proxy; real-zone CDT robustness is Phase 4's risk.
 
+### Perf + correctness pass (DONE, committed `1f8a281`, deployed v1.2.3.39)
+
+4-way code review of the whole pathfinding stack, fixes applied + Opus-verified:
+- **Polyanya hang fixed (∞ → 8ms on the 116k-quad/843k-face Limsa mesh).** Root
+  causes: O(N) closed-interval scan (→ `_closedG` map), off-mesh links scanned
+  per expansion (→ per-face index), `FindStartFace` scanning all faces (→ quad
+  face index), and — the subtle one — an **inadmissible heuristic** (f used a
+  single closest-to-root point). Replaced with the true reflection-based
+  interval lower bound + solution-bounded termination ⇒ fast AND optimal (all
+  PolyanyaVsFunnel tests pass). NOTE: the Sonnet fix agent got this wrong (chose
+  full-component search); Opus correction was required.
+- Build thread saturation (256 Task.Run blocking the semaphore → ~255 stuck
+  threads) → `Parallel.ForEach` bounded by `BuildMaxCores`.
+- `FloodReachable` O(nodes×portals) ~7s prune → off-mesh portals indexed by
+  FromQuad. `NearestQuad` O(n)/query on 116k quads → lazy uniform-grid index.
+- `BuildAdjacency` was wiping inter-layer off-mesh links (Portals.Clear) →
+  snapshot/restore. PopulateChf merges overlapping spans. Lazy CHF/_rawSpans
+  allocation. LayerPartition: layer-aware wall classification, O(1) contour
+  chain assembly, correct collinear prev, boundary-spanning inter-layer links.
+- Flight correctness (deferred perf rewrites to the flight phase): LoS
+  double-floor, zero-length LoS NaN, duplicate waypoints, WorldToVoxel floor.
+
+### Phase 4 (DONE, committed, deployed v1.2.3.40)
+
+Per-layer CDT ground mesh from the Phase-3 contours, gated by
+`Config.UseCdtMesh` — code default **true** (`[JsonIgnore]`, NOT user-serialized;
+greedy quad path kept as the reversible fallback until in-game-verified, then
+both removed). `Navmesh.Version` 28→29.
+- `GroundGraph/CDT/Cdt.cs`: incremental Bowyer-Watson (Phase-1 robust
+  predicates); constraint insertion by the **Anglada/Sloan crossing-strip walk**
+  with a hard assert that the constraint edge exists afterward (the first impl
+  only walked triangles incident to the first endpoint and SILENTLY DROPPED
+  constraints crossing a multi-triangle strip → would route through walls; caught
+  in review, fixed); post-constraint Delaunay re-legalization; even-odd
+  hole/exterior cull.
+- `GroundGraph/CDT/CdtMeshBuilder.cs`: contour-segment→oriented-loop assembly,
+  per-layer CDT → triangle `PolyMesh`; `BuildMerged` stitches per-tile meshes
+  with seam T-junction healing + cross-tile vertex welding.
+- `QuadGraph.SetCdtMesh`/`PrebuiltMesh`: `Pathfind` uses `PrebuiltMesh ??
+  FromQuadGraph`; 6-arg signature + IPC byte-identical. `PolyanyaSearch`
+  start/goal face resolution gained a geometric fall-through (AABB-quad-per-
+  triangle hint can miss).
+- Tests: CdtTests (CCW/Delaunay/watertight/constraints + flip-forcing interior
+  diagonal + jagged concave + 2-tile stitch = single connected component),
+  CoverageRegression (CDT ≥ greedy on all 6 scenes), ConfigSerialization.
+  Build 0/0, tests 92/92.
+
+### Needs in-game verification (perf pass + Phase 4)
+- Rebuild Limsa `s1t2` on v1.2.3.40 (`/vnav rebuild`): build must be FAST (no
+  ~41s adjacency stall, no thread thrash), and the `[ground] quad graph` line
+  should show a healthy quad/portal count.
+- Walk the ramp+corner that had no path: devlog should show `ground OK … wps>0`,
+  pathfind in single-digit ms, taut path, no clipping through walls (the CDT
+  constraint-drop bug would manifest as wall-clipping — verify it doesn't).
+- If CDT misbehaves on the real multi-tile zone (cross-tile stitching is only
+  proven offline), set `Config.UseCdtMesh=false` to fall back to greedy (Phase 3)
+  and report. Once CDT is verified, remove the greedy path + the flag +
+  TEMP-DEVLOG instrumentation.
+
 ### Remaining PLAN3 phases
-- Phase 4: CDT mesh from contours, gated by `Config.UseCdtMesh` (code-default
-  false). Bumps `Navmesh.Version` 28→29.
 - Phase 5: LCT clearance (5.1 ship gate = per-edge approximate clearance,
   reject crossing when `Clearance < 2*agentRadius`). Bumps 29→30.
-- Phase 6: additive `Nav.PathfindWithRadius` IPC + debug viz; consolidation.
+- Phase 6: additive `Nav.PathfindWithRadius` IPC + debug viz; consolidation
+  (incl. removing the greedy fallback + `UseCdtMesh` flag once CDT is verified).
+- Phase 7: flight modernization (octree cell-merge + 3D funnel); independent.
