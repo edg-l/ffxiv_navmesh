@@ -31,4 +31,7 @@ public class Service
     public static T? LuminaRow<T>(uint row) where T : struct, Lumina.Excel.IExcelRow<T> => LuminaSheet<T>()?.GetRowOrDefault(row);
 
     public static Config Config = new();
+
+    // TEMP-DEVLOG: live metric uploader for in-game Polyanya testing. Remove when done.
+    public static ZhyraPluginKit.DevTelemetry? Telemetry;
 }

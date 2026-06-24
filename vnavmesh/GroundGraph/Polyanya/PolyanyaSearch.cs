@@ -58,6 +58,12 @@ public class PolyanyaSearch
     private Vector2 _target;
     private float _targetY;
     private float _goalRange;
+    // Source-quad ids resolved 3D-aware by QuadGraph.NearestQuad. -1 = unknown
+    // (geometric fallback). Used to seed the search on the correct Y-layer and
+    // to accept goal faces only on the target's quad, so a stacked face that
+    // merely overlaps in XZ at a different Y is never chosen.
+    private int _startQuad = -1;
+    private int _goalQuad = -1;
 
     public PolyanyaSearch(PolyMesh mesh)
     {
@@ -85,18 +91,28 @@ public class PolyanyaSearch
     // Find an any-angle path from `from` to `to` in XZ; Y is carried from the
     // face floor. Returns world-space waypoints (from prepended, to appended).
     // Returns empty list if no path. range > 0 terminates early when within range.
+    // Geometric overload (no quad hints) — used by tests on single-layer scenes.
     public List<Vector3> FindPath(Vector3 from, Vector3 to, float range, CancellationToken cancel)
+        => FindPath(from, to, -1, -1, range, cancel);
+
+    public List<Vector3> FindPath(Vector3 from, Vector3 to, int fromQuad, int toQuad, float range, CancellationToken cancel)
     {
         _goalRange = range;
         _target = new Vector2(to.X, to.Z);
         _targetY = to.Y;
+        _startQuad = fromQuad;
+        _goalQuad = toQuad;
         _nodes.Clear();
         _open.Clear();
         _bestGoal = -1;
         _expandedCount = 0;
         _goalPushCount = 0;
 
-        int startFace = FindFaceContaining(new Vector2(from.X, from.Z));
+        // Seed on the correct Y-layer: among reachable faces, prefer the
+        // resolved start quad's faces (3D-aware), then the one containing `from`
+        // in XZ, falling back to nearest floor-Y. XZ-only location is wrong on
+        // stacked multi-level geometry (e.g. Limsa).
+        int startFace = FindStartFace(new Vector2(from.X, from.Z), from.Y);
         if (startFace < 0)
             return [];
 
@@ -169,7 +185,7 @@ public class PolyanyaSearch
         if (node.Edge < 0)
         {
             // Seed: root inside `face`. If target is in this face, direct path.
-            if (FaceContainsXZ(face, _target))
+            if (IsGoalFace(face))
                 PushGoal(nodeIdx, node.Root, _target);
             // Expand all three edges as exit candidates into their neighbours.
             for (int e = 0; e < 3; ++e)
@@ -184,7 +200,7 @@ public class PolyanyaSearch
             // §3.2). Otherwise the path bends through the closest point on [a,b]
             // to the target (non-observable goal); the turning point is that
             // closest point.
-            if (FaceContainsXZ(face, _target))
+            if (IsGoalFace(face))
                 PushGoalForFace(nodeIdx, face, node.Root, node.A, node.B, node.GRoot);
             // Non-observable successors: expand the OTHER edges of `face` (not
             // the entry edge) into their neighbours.
@@ -520,16 +536,56 @@ public class PolyanyaSearch
 
     // ---- Geometry helpers ----
 
-    private int FindFaceContaining(Vector2 p)
+    // A face qualifies as a goal iff it geometrically contains the target in XZ
+    // AND (when known) belongs to the target's resolved quad. The quad gate
+    // prevents accepting a face that overlaps the target's XZ but sits on a
+    // different Y-layer (multi-level geometry).
+    private bool IsGoalFace(int face)
     {
+        if (_goalQuad >= 0 && _mesh.SourceQuad[face] != _goalQuad)
+            return false;
+        return FaceContainsXZ(face, _target);
+    }
+
+    // Resolve the seed face. Prefer faces of the resolved start quad (3D-aware),
+    // then a face that contains `p` in XZ, otherwise the nearest floor-Y. Falls
+    // back to a Y-aware geometric scan when no quad hint is available.
+    private int FindStartFace(Vector2 p, float y)
+    {
+        if (_startQuad >= 0)
+        {
+            int contains = -1, nearest = -1;
+            float bestContainsDY = float.MaxValue, bestNearestDY = float.MaxValue;
+            for (int i = 0; i < _mesh.Faces.Count; ++i)
+            {
+                if (_mesh.SourceQuad[i] != _startQuad || !FaceIsReachable(i))
+                    continue;
+                float dy = MathF.Abs(_mesh.Faces[i].Y - y);
+                if (FaceContainsXZ(i, p) && dy < bestContainsDY) { bestContainsDY = dy; contains = i; }
+                if (dy < bestNearestDY) { bestNearestDY = dy; nearest = i; }
+            }
+            if (contains >= 0) return contains;
+            if (nearest >= 0) return nearest;
+        }
+        return FindFaceContaining(p, y);
+    }
+
+    // Y-aware geometric face location: among reachable faces whose XZ triangle
+    // contains `p`, return the one whose floor-Y is closest to `y`.
+    private int FindFaceContaining(Vector2 p, float y)
+    {
+        int best = -1;
+        float bestDY = float.MaxValue;
         for (int i = 0; i < _mesh.Faces.Count; ++i)
         {
             if (!FaceIsReachable(i))
                 continue;
-            if (FaceContainsXZ(i, p))
-                return i;
+            if (!FaceContainsXZ(i, p))
+                continue;
+            float dy = MathF.Abs(_mesh.Faces[i].Y - y);
+            if (dy < bestDY) { bestDY = dy; best = i; }
         }
-        return -1;
+        return best;
     }
 
     private bool FaceContainsXZ(int face, Vector2 p)

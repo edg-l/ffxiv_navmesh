@@ -27,6 +27,10 @@ public class Config
     public int SplineSegments = 8;
     public int BuildMaxCores = 1;
 
+    // TEMP-DEVLOG: live metric uploader for in-game Polyanya testing. Remove when done.
+    public bool DevLog = false;
+    public string DevLogUrl = "http://192.168.88.248:9999/log";
+
     private static readonly int realMaxCores = Environment.ProcessorCount;
 
     public event Action? Modified;
@@ -87,6 +91,17 @@ public class Config
         {
             ImGui.SetNextItemWidth(200);
             if (ImGui.SliderInt("Spline segments", ref SplineSegments, 2, 32))
+                NotifyModified();
+        }
+
+        // TEMP-DEVLOG: live metric uploader for in-game Polyanya testing. Remove when done.
+        ImGui.Separator();
+        if (ImGui.Checkbox("[dev] Upload pathfind metrics to devlog server", ref DevLog))
+            NotifyModified();
+        using (ImRaii.Disabled(!DevLog))
+        {
+            ImGui.SetNextItemWidth(300);
+            if (ImGui.InputText("[dev] devlog URL", ref DevLogUrl, 256))
                 NotifyModified();
         }
     }

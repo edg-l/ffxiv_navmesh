@@ -37,6 +37,10 @@ public sealed class Plugin : IDalamudPlugin
         Service.Config.Load(dalamud.ConfigFile);
         Service.Config.Modified += () => Service.Config.Save(dalamud.ConfigFile);
 
+        // TEMP-DEVLOG: live metric uploader for in-game Polyanya testing. Remove when done.
+        Service.Telemetry = new ZhyraPluginKit.DevTelemetry("vnavmesh", () => Service.Config.DevLog, () => Service.Config.DevLogUrl,
+            err => Service.Log.Debug($"devlog post failed: {err}"));
+
         _navmeshManager = new(new($"{dalamud.ConfigDirectory.FullName}/meshcache"));
         _followPath = new(dalamud, _navmeshManager);
         _asyncMove = new(_navmeshManager, _followPath);
@@ -95,6 +99,9 @@ public sealed class Plugin : IDalamudPlugin
         _asyncMove.Dispose();
         _followPath.Dispose();
         _navmeshManager.Dispose();
+
+        // TEMP-DEVLOG: live metric uploader for in-game Polyanya testing. Remove when done.
+        Service.Telemetry?.Dispose();
     }
 
     public static void DuoLog(Exception ex)

@@ -275,7 +275,14 @@ public class QuadGraph
         var toReachable = toQuad >= 0 && toQuad < Flags.Length && (Flags[toQuad] & FLAG_UNREACHABLE) == 0;
         Service.Log.Debug($"[pathfind] quad {fromQuad} -> {toQuad} (of {Quads.Count} quads, {Portals.Count} portals; fromReachable={fromReachable}, toReachable={toReachable})");
         if (fromQuad < 0 || toQuad < 0 || !fromReachable || !toReachable)
+        {
+            // TEMP-DEVLOG: remove with the rest of the TEMP-DEVLOG markers.
+            Service.Telemetry?.Log($"ground EMPTY from={from:F1} to={to:F1} fromQuad={fromQuad} toQuad={toQuad} fromReach={fromReachable} toReach={toReachable}");
             return [];
+        }
+
+        // TEMP-DEVLOG: time the Polyanya search.
+        var _devsw = System.Diagnostics.Stopwatch.StartNew();
 
         // Build (or reuse) the triangle PolyMesh derived from this graph. The
         // mesh is any-angle by construction, so `useStringPulling` is a no-op
@@ -288,8 +295,15 @@ public class QuadGraph
         var search = new PolyanyaSearch(mesh);
         if (Flags.Length > 0)
             search.SetQuadFlags(Flags, FLAG_UNREACHABLE);
-        var path = search.FindPath(from, to, range, cancel);
+        var path = search.FindPath(from, to, fromQuad, toQuad, range, cancel);
         Service.Log.Debug($"[pathfind] polyanya returned {path.Count} waypoints");
+        // TEMP-DEVLOG: remove with the rest of the TEMP-DEVLOG markers.
+        _devsw.Stop();
+        var _devlen = 0f;
+        for (int i = 1; i < path.Count; ++i)
+            _devlen += Vector3.Distance(path[i - 1], path[i]);
+        var _devstraight = Vector3.Distance(from, to);
+        Service.Telemetry?.Log($"ground OK from={from:F1} to={to:F1} quads={fromQuad}->{toQuad} mesh(faces={mesh.Faces.Count}) range={range:F1} wps={path.Count} len={_devlen:F1} straight={_devstraight:F1} ratio={(_devstraight > 0.01f ? _devlen / _devstraight : 1f):F2} {_devsw.Elapsed.TotalMilliseconds:F2}ms");
         return path;
     }
 }

@@ -78,6 +78,41 @@ public class PolyanyaTests : IClassFixture<ServiceFixture>
     }
 
     [Fact]
+    public void StackedLayers_SeedsCorrectLayer_NotXZFirstMatch()
+    {
+        // Regression: two quads share the SAME XZ footprint at different Y
+        // (stacked floors, e.g. Limsa). The UPPER quad is added first, so a
+        // naive XZ-only face lookup would seed the search on the upper layer —
+        // a different connected component than the lower-layer endpoints — and
+        // return no path. Face location must be Y-aware (and honor the resolved
+        // source quad) so a same-lower-quad query still resolves.
+        var graph = new QuadGraph(new Vector3(-50, -10, -50), new Vector3(50, 50, 50));
+        // Upper quad FIRST (faces 0,1) — the XZ-first trap.
+        int upper = graph.AddQuad(new Quad(0f, 20f, 0f, 20f, 20f, 20f, Navmesh.AreaId.Default));
+        // Lower quad SECOND (faces 2,3), identical XZ footprint, far below.
+        int lower = graph.AddQuad(new Quad(0f, 0f, 0f, 20f, 0f, 20f, Navmesh.AreaId.Default));
+        graph.BuildAdjacency(2f);   // 20y apart => not adjacent, distinct components
+        graph.InitFlags();          // all reachable
+        var mesh = PolyMesh.FromQuadGraph(graph);
+        var search = new PolyanyaSearch(mesh);
+        using var cts = new CancellationTokenSource(5000);
+
+        var from = new Vector3(3f, 0f, 3f);
+        var to = new Vector3(17f, 0f, 17f);
+
+        // Quad-hinted overload (production path): must find a path on the lower layer.
+        var hinted = search.FindPath(from, to, lower, lower, 0f, cts.Token);
+        Assert.NotEmpty(hinted);
+        Assert.True(Vector3.Distance(hinted[^1], to) < 0.5f);
+        Assert.All(hinted, w => Assert.True(w.Y < 10f, $"waypoint leaked to upper layer: {w}"));
+
+        // Geometric overload (no hints) must also be Y-aware now.
+        var geo = new PolyanyaSearch(mesh).FindPath(from, to, 0f, cts.Token);
+        Assert.NotEmpty(geo);
+        Assert.All(geo, w => Assert.True(w.Y < 10f, $"geometric seed leaked to upper layer: {w}"));
+    }
+
+    [Fact]
     public void FlatPlane_Polyanya_TwoPointStraight()
     {
         // FlatPlane: any-angle path must be a single straight segment (2

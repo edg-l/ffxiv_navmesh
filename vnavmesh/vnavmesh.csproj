@@ -1,12 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project Sdk="Dalamud.NET.Sdk/15.0.0">
   <PropertyGroup>
-    <Version>1.2.3.33</Version>
+    <Version>1.2.3.35</Version>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="SharpDX.D3DCompiler" Version="4.2.0" />
     <PackageReference Include="SharpDX.Direct3D11" Version="4.2.0" />
     <PackageReference Include="SharpDX.Mathematics" Version="4.2.0" />
     <Reference Include="Dalamud.Common" Private="false" />
+  </ItemGroup>
+  <!-- TEMP-DEVLOG: live metric uploader for in-game Polyanya testing. Remove this ItemGroup when done. -->
+  <ItemGroup>
+    <Compile Include="..\..\ZhyraPluginKit\DevTelemetry.cs" Link="Dev\DevTelemetry.cs" />
   </ItemGroup>
 </Project>
