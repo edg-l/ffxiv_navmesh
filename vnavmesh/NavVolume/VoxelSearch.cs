@@ -60,9 +60,14 @@ public static class VoxelSearch
     // enumerate entered voxels along line; starting voxel is not returned, ending voxel is
     public static IEnumerable<(ulong voxel, float t, bool empty)> EnumerateVoxelsInLine(VoxelMap volume, ulong fromVoxel, ulong toVoxel, Vector3 fromPos, Vector3 toPos)
     {
-        var origFrom = fromVoxel;
+        // H2: guard against zero-length segment (avoids eps = Infinity NaN path).
         var ab = toPos - fromPos;
-        var eps = 0.1f / ab.Length();
+        float abLen = ab.Length();
+        if (abLen < 1e-6f)
+            yield break;
+
+        var origFrom = fromVoxel;
+        var eps = 0.1f / abLen;
         while (fromVoxel != toVoxel)
         {
             var (vmin, vmax) = volume.VoxelBounds(fromVoxel, 0);
@@ -75,7 +80,8 @@ public static class VoxelSearch
             // Service.Log.Debug($"{fromVoxel:X} -> {toVoxel:X}: t={tx:f3}x{ty:f3}x{tz:f3}={t:f3}");
             var tAdj = Math.Min(t + eps, 1);
             var proj = fromPos + tAdj * ab;
-            var (nextVoxel, nextEmpty) = volume.FindLeafVoxel(proj.Floor());
+            // H1: pass proj (world coords) directly without Floor().
+            var (nextVoxel, nextEmpty) = volume.FindLeafVoxel(proj);
             if (nextVoxel == fromVoxel)
                 throw new PathfindLoopException(origFrom, toVoxel, fromPos, toPos);
             yield return (nextVoxel, t, nextEmpty);

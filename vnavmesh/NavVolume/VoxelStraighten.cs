@@ -49,8 +49,11 @@ public class VoxelStraighten
             }
         }
 
-        result.Add(path[^1].p);
-        result.Add(toPos);
+        // H3: guard against duplicating the previous waypoint.
+        if (Vector3.DistanceSquared(path[^1].p, result[^1]) > 1e-8f)
+            result.Add(path[^1].p);
+        if (Vector3.DistanceSquared(toPos, result[^1]) > 1e-8f)
+            result.Add(toPos);
         return result;
     }
 

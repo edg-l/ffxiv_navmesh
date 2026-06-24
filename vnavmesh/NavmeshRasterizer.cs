@@ -121,10 +121,12 @@ public class NavmeshRasterizer
     // Optional CompactHeightfield to populate. When non-null, raw spans are
     // accumulated in _rawSpans and flushed into the CHF by PopulateChf().
     private CompactHeightfield? _chf;
-    // Raw span accumulator: per-column list of (y0 voxel bottom, y1 voxel top, area).
-    // y0 and y1 are inclusive voxel indices. World-Y of span top = _bmin.Y + (y1 + 1) * _ch.
-    // y0 is needed to compute clearance: space above a floor = bottom of next span above it.
-    private List<(int y0, int y1, byte area)>[]? _rawSpans;
+    // E2: raw span accumulator with lazy allocation (null entry = empty column).
+    // Saves ~280k List<> allocations per tile for empty border columns.
+    private List<(int y0, int y1, byte area)>?[]? _rawSpans;
+    // E3: cached static Comparison<> to avoid per-column delegate allocation.
+    private static readonly Comparison<(int y0, int y1, byte area)> SpanCompareByY1
+        = (a, b) => a.y1.CompareTo(b.y1);
 
     public NavmeshRasterizer(Voxelizer? voxelizer, Vector3 boundsMin, Vector3 boundsMax, float cellSize, float cellHeight, int borderSize, float walkableNormalThreshold, int walkableMaxClimb, int minGap, bool fillInteriors, CompactHeightfield? chf = null)
     {
@@ -157,9 +159,8 @@ public class NavmeshRasterizer
         if (chf != null)
         {
             _chf = chf;
-            _rawSpans = new List<(int y0, int y1, byte area)>[_width * _height];
-            for (int i = 0; i < _rawSpans.Length; i++)
-                _rawSpans[i] = new List<(int, int, byte)>();
+            // E2: allocate the outer array but leave entries null (lazily allocated in AddSpan).
+            _rawSpans = new List<(int y0, int y1, byte area)>?[_width * _height];
         }
     }
 
@@ -177,24 +178,25 @@ public class NavmeshRasterizer
         {
             for (int x = 0; x < _width; x++)
             {
+                // E2: skip null (empty) columns.
                 var raw = _rawSpans[z * _width + x];
-                if (raw.Count == 0)
+                if (raw == null || raw.Count == 0)
                     continue;
 
-                // Sort by y1 ascending (top of span).
-                raw.Sort((a, b) => a.y1.CompareTo(b.y1));
+                // E3: sort using cached static Comparison<> to avoid per-column allocation.
+                raw.Sort(SpanCompareByY1);
 
-                // Merge overlapping/touching spans: spans with the same y1 → walkable
-                // wins (area 1 over area 0). We keep track of both y0 and y1 so
-                // clearance is computed as bottom of next span minus floor of this span.
+                // E1: merge overlapping/touching spans (not just same-y1). Two spans
+                // overlap when the next span's y0 <= current merged top + 1.
+                // For merged spans: take y0=min, y1=max, area=max (walkable wins).
                 var merged = new List<(int y0, int y1, byte area)>();
                 foreach (var s in raw)
                 {
-                    if (merged.Count > 0 && merged[^1].y1 == s.y1)
+                    if (merged.Count > 0 && s.y0 <= merged[^1].y1 + 1)
                     {
-                        // Same top: walkable wins; take the lower y0 for a wider span.
-                        if (s.area > merged[^1].area)
-                            merged[^1] = (Math.Min(merged[^1].y0, s.y0), s.y1, s.area);
+                        // Overlapping or touching: extend the current merged span.
+                        var prev = merged[^1];
+                        merged[^1] = (Math.Min(prev.y0, s.y0), Math.Max(prev.y1, s.y1), (byte)Math.Max(prev.area, s.area));
                     }
                     else
                     {
@@ -421,9 +423,13 @@ public class NavmeshRasterizer
             }
         }
 
-        // Record span (bottom, top) into the raw accumulator for CHF population.
+        // E2: lazily allocate the per-column list on first use.
         if (_rawSpans != null && x >= 0 && x < _width && z >= 0 && z < _height)
-            _rawSpans[z * _width + x].Add((y0, y1, (byte)areaId));
+        {
+            int ci = z * _width + x;
+            _rawSpans[ci] ??= new List<(int, int, byte)>();
+            _rawSpans[ci]!.Add((y0, y1, (byte)areaId));
+        }
     }
 
     private void FillInterior(int z0, int z1, int x0, int x1, int yBelowNonManifold)

@@ -147,11 +147,11 @@ public static class ContourExtractor
                     if (partition.GetLayer(x, z, si) != layerId) continue;
                     float floorY = spans[si].FloorY;
 
-                    // Check 4 edges of this cell.
-                    CheckEdge(partition, chf, wallEdges, x, z, si, floorY, 1, 0, climbWorld);   // +X edge
-                    CheckEdge(partition, chf, wallEdges, x, z, si, floorY, -1, 0, climbWorld);  // -X edge
-                    CheckEdge(partition, chf, wallEdges, x, z, si, floorY, 0, 1, climbWorld);   // +Z edge
-                    CheckEdge(partition, chf, wallEdges, x, z, si, floorY, 0, -1, climbWorld);  // -Z edge
+                    // Check 4 edges of this cell. G1: pass layerId for layer-aware wall check.
+                    CheckEdge(partition, chf, wallEdges, x, z, si, floorY, layerId, 1, 0, climbWorld);   // +X edge
+                    CheckEdge(partition, chf, wallEdges, x, z, si, floorY, layerId, -1, 0, climbWorld);  // -X edge
+                    CheckEdge(partition, chf, wallEdges, x, z, si, floorY, layerId, 0, 1, climbWorld);   // +Z edge
+                    CheckEdge(partition, chf, wallEdges, x, z, si, floorY, layerId, 0, -1, climbWorld);  // -Z edge
                 }
             }
         }
@@ -161,9 +161,14 @@ public static class ContourExtractor
         return simplified;
     }
 
+    // G1: layer-aware edge classification. An edge is a WALL for layerId unless:
+    //   (a) a within-climb neighbour span in the SAME layer continues (interior), or
+    //   (b) a within-climb neighbour span in a DIFFERENT layer exists (open seam).
+    // A neighbour column that has NO within-climb span for layerId and only
+    // out-of-climb or same-layer spans outside climb is a WALL.
     private static void CheckEdge(LayerPartition partition, CompactHeightfield chf,
         List<(Vector2 a, Vector2 b)> wallEdges,
-        int x, int z, int si, float floorY, int dx, int dz, float climbWorld)
+        int x, int z, int si, float floorY, int layerId, int dx, int dz, float climbWorld)
     {
         int nx = x + dx, nz = z + dz;
         bool isWall = true;
@@ -177,12 +182,16 @@ public static class ContourExtractor
                 float diff = MathF.Abs(nspans[ni].FloorY - floorY);
                 if (diff <= climbWorld)
                 {
-                    // Neighbour within climb. Could be same layer (interior edge) or
-                    // different layer (open seam). Not a wall.
-                    isWall = false;
-                    break;
+                    int nLayer = partition.GetLayer(nx, nz, ni);
+                    // Same layer continues (interior edge) or different layer (open seam):
+                    // either way this is not a wall for layerId.
+                    if (nLayer == layerId || nLayer >= 0)
+                    {
+                        isWall = false;
+                        break;
+                    }
                 }
-                // Over-climb neighbour: wall (ledge).
+                // Over-climb or non-walkable neighbour: potential wall — keep checking.
             }
         }
         // Out of bounds: wall.
@@ -215,7 +224,20 @@ public static class ContourExtractor
             return new List<List<Vector2>>();
 
         // Step 1: chain segments by matching endpoints into polylines.
-        // Build adjacency map: point → list of segment indices that start or end there.
+        // G2: build a point→segment-index map for O(1) next/prev lookups.
+        // Each segment (ea, eb) contributes to buckets keyed by ea and eb.
+        // We use a simple Dictionary<Vector2, List<int>> for the endpoints.
+        var byA = new Dictionary<Vector2, List<int>>();
+        var byB = new Dictionary<Vector2, List<int>>();
+        for (int i = 0; i < edges.Count; i++)
+        {
+            var (ea, eb) = edges[i];
+            if (!byA.TryGetValue(ea, out var la)) byA[ea] = la = new List<int>();
+            la.Add(i);
+            if (!byB.TryGetValue(eb, out var lb)) byB[eb] = lb = new List<int>();
+            lb.Add(i);
+        }
+
         var remaining = new HashSet<int>(Enumerable.Range(0, edges.Count));
         var chains = new List<List<Vector2>>();
 
@@ -224,60 +246,82 @@ public static class ContourExtractor
             // Start a new chain from the first remaining segment.
             int startIdx = -1;
             foreach (var i in remaining) { startIdx = i; break; }
+            RemoveFromIndex(byA, edges[startIdx].a, startIdx);
+            RemoveFromIndex(byB, edges[startIdx].b, startIdx);
             remaining.Remove(startIdx);
 
-            var chain = new List<Vector2> { edges[startIdx].a, edges[startIdx].b };
+            // G3: accumulate backward extension in a separate list, prepend once.
+            var forward = new List<Vector2> { edges[startIdx].a, edges[startIdx].b };
+            var backward = new List<Vector2>(); // points to prepend (in reverse order)
 
-            // Try to extend the chain forward (matching chain tail to a segment's start).
+            // Extend forward via byA[tail] or byB[tail].
             bool extended = true;
             while (extended)
             {
                 extended = false;
-                var tail = chain[^1];
-                foreach (var i in remaining)
+                var tail = forward[^1];
+                int found = -1;
+                bool flipFound = false;
+                if (byA.TryGetValue(tail, out var matchA))
                 {
-                    var (ea, eb) = edges[i];
-                    if (Vector2.DistanceSquared(ea, tail) < 1e-6f)
-                    {
-                        remaining.Remove(i);
-                        chain.Add(eb);
-                        extended = true;
-                        break;
-                    }
-                    if (Vector2.DistanceSquared(eb, tail) < 1e-6f)
-                    {
-                        remaining.Remove(i);
-                        chain.Add(ea);
-                        extended = true;
-                        break;
-                    }
+                    foreach (int i in matchA) { if (remaining.Contains(i)) { found = i; flipFound = false; break; } }
+                }
+                if (found < 0 && byB.TryGetValue(tail, out var matchB))
+                {
+                    foreach (int i in matchB) { if (remaining.Contains(i)) { found = i; flipFound = true; break; } }
+                }
+                if (found >= 0)
+                {
+                    RemoveFromIndex(byA, edges[found].a, found);
+                    RemoveFromIndex(byB, edges[found].b, found);
+                    remaining.Remove(found);
+                    forward.Add(flipFound ? edges[found].a : edges[found].b);
+                    extended = true;
                 }
             }
 
-            // Try to extend the chain backward (matching chain head to a segment's end).
+            // Extend backward via byB[head] or byA[head].
             extended = true;
             while (extended)
             {
                 extended = false;
-                var head = chain[0];
-                foreach (var i in remaining)
+                var head = forward[0];
+                // Also consider already-prepended backward points:
+                if (backward.Count > 0) head = backward[^1];
+                else head = forward[0];
+                int found = -1;
+                bool flipFound = false;
+                if (byB.TryGetValue(head, out var matchB))
                 {
-                    var (ea, eb) = edges[i];
-                    if (Vector2.DistanceSquared(eb, head) < 1e-6f)
-                    {
-                        remaining.Remove(i);
-                        chain.Insert(0, ea);
-                        extended = true;
-                        break;
-                    }
-                    if (Vector2.DistanceSquared(ea, head) < 1e-6f)
-                    {
-                        remaining.Remove(i);
-                        chain.Insert(0, eb);
-                        extended = true;
-                        break;
-                    }
+                    foreach (int i in matchB) { if (remaining.Contains(i)) { found = i; flipFound = false; break; } }
                 }
+                if (found < 0 && byA.TryGetValue(head, out var matchA))
+                {
+                    foreach (int i in matchA) { if (remaining.Contains(i)) { found = i; flipFound = true; break; } }
+                }
+                if (found >= 0)
+                {
+                    RemoveFromIndex(byA, edges[found].a, found);
+                    RemoveFromIndex(byB, edges[found].b, found);
+                    remaining.Remove(found);
+                    // G3: accumulate in backward list (we'll prepend all at once).
+                    backward.Add(flipFound ? edges[found].b : edges[found].a);
+                    extended = true;
+                }
+            }
+
+            // G3: prepend all backward points at once.
+            List<Vector2> chain;
+            if (backward.Count > 0)
+            {
+                backward.Reverse();
+                chain = new List<Vector2>(backward.Count + forward.Count);
+                chain.AddRange(backward);
+                chain.AddRange(forward);
+            }
+            else
+            {
+                chain = forward;
             }
 
             if (chain.Count >= 2)
@@ -285,15 +329,15 @@ public static class ContourExtractor
         }
 
         // Step 2: within each chain, remove collinear middle vertices.
-        // Three consecutive points A, B, C are collinear if the cross product
-        // (B-A) x (C-A) ≈ 0 (in 2D: (B.X-A.X)*(C.Y-A.Y) - (B.Y-A.Y)*(C.X-A.X)).
+        // G4: use chain[i-1] (original neighbour) for the collinearity test, not
+        // simplified[^1] (last kept point), to avoid corner errors on non-axis-aligned contours.
         var result = new List<List<Vector2>>(chains.Count);
         foreach (var chain in chains)
         {
             var simplified = new List<Vector2> { chain[0] };
             for (int i = 1; i < chain.Count - 1; i++)
             {
-                var prev = simplified[^1];
+                var prev = chain[i - 1]; // G4: original neighbour, not simplified[^1]
                 var curr = chain[i];
                 var next = chain[i + 1];
                 float cross = (curr.X - prev.X) * (next.Y - prev.Y)
@@ -308,6 +352,12 @@ public static class ContourExtractor
         }
 
         return result;
+    }
+
+    private static void RemoveFromIndex(Dictionary<Vector2, List<int>> index, Vector2 key, int idx)
+    {
+        if (index.TryGetValue(key, out var list))
+            list.Remove(idx);
     }
 }
 
@@ -361,10 +411,10 @@ public static class LinkExtractor
                             var key = (la, lb, Math.Min(x, nx), Math.Min(z, nz), Math.Max(x, nx), Math.Max(z, nz));
                             if (!seenPairs.Add(key)) continue;
 
-                            float cx = chf.CellMinX(x) + (dx == 1 ? chf.CellSize : chf.CellSize * 0.5f);
-                            float cz = chf.CellMinZ(z) + (dz == 1 ? chf.CellSize : chf.CellSize * 0.5f);
-                            var posA = new Vector3(cx, floorA, cz);
-                            var posB = new Vector3(cx, floorB, cz);
+                            // G5: posA at center of cell (x,z), posB at center of
+                            // neighbour cell (nx,nz), so the link crosses the boundary.
+                            var posA = chf.CellCenter(x, z, floorA);
+                            var posB = chf.CellCenter(nx, nz, floorB);
                             links.Add(new LayerLink(layA, layB, posA, posB));
                         }
                     }

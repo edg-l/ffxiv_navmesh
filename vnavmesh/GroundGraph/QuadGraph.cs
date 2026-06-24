@@ -23,6 +23,13 @@ public class QuadGraph
     // long as Quads/Portals/Adjacency don't change.
     private PolyMesh? _cachedPolyMesh;
 
+    // C3: lazily-built uniform-grid spatial index for NearestQuad. Cell size ~4
+    // yalms gives a good balance for FFXIV zones (quads are typically 0.25–8 y wide).
+    private const float SpatialGridCell = 4f;
+    private List<int>[]? _spatialGrid;
+    private int _sgCellsX, _sgCellsZ;
+    private float _sgOriginX, _sgOriginZ;
+
     public int Count => Quads.Count;
 
     public QuadGraph(Vector3 boundsMin, Vector3 boundsMax)
@@ -83,6 +90,15 @@ public class QuadGraph
     {
         MaxClimb = maxClimb;
         _cachedPolyMesh = null;
+        _spatialGrid = null; // C3: invalidate spatial index when quads/portals change
+
+        // C1: snapshot existing off-mesh portals BEFORE clearing, so inter-layer
+        // portals added by QuadMesher.MeshInto via AddOffMesh are preserved.
+        var savedOffMesh = new List<Portal>();
+        foreach (var p in Portals)
+            if (p.IsOffMesh)
+                savedOffMesh.Add(p);
+
         for (int i = 0; i < Quads.Count; ++i)
             Adjacency[i].Clear();
         Portals.Clear();
@@ -113,6 +129,16 @@ public class QuadGraph
         foreach (var (k, t) in topZ)
             if (botZ.TryGetValue(k, out var b))
                 ConnectOverlapping(t, b, vertical: false, maxClimb, agentRadius);
+
+        // C1: restore off-mesh portals and their adjacency entries.
+        foreach (var p in savedOffMesh)
+        {
+            Portals.Add(p);
+            if (p.FromQuad >= 0 && p.FromQuad < Adjacency.Count)
+                Adjacency[p.FromQuad].Add(p.ToQuad);
+            if (p.ToQuad >= 0 && p.ToQuad < Adjacency.Count)
+                Adjacency[p.ToQuad].Add(p.FromQuad);
+        }
     }
 
     // Quantize an edge coordinate to a bucket key. Greedy-mesh quad edges are
@@ -151,8 +177,8 @@ public class QuadGraph
         // Starts (0,1) before ends (2,3) at equal coord; TryFindSharedEdge filters
         // zero-overlap (touching) pairs via its strict lo<hi check.
         events.Sort((u, v) => u.coord != v.coord ? u.coord.CompareTo(v.coord) : u.kind.CompareTo(v.kind));
-        var activeA = new List<int>();
-        var activeB = new List<int>();
+        var activeA = new HashSet<int>(); // C2: HashSet avoids O(N) Remove-by-value
+        var activeB = new HashSet<int>();
         foreach (var (_, kind, idx) in events)
         {
             switch (kind)
@@ -263,6 +289,14 @@ public class QuadGraph
 
     public int NearestQuad(Vector3 p, float maxDist = float.MaxValue, bool allowUnreachable = true)
     {
+        // C3: use spatial grid for fast lookup when available and no strict maxDist.
+        if (_spatialGrid != null && maxDist >= float.MaxValue * 0.5f && allowUnreachable)
+        {
+            int result = NearestQuadSpatial(p);
+            if (result >= 0)
+                return result;
+        }
+
         int best = -1;
         float bestDist = maxDist;
         for (int i = 0; i < Quads.Count; ++i)
@@ -299,8 +333,104 @@ public class QuadGraph
         return best;
     }
 
+    // C3: build the spatial grid lazily the first time it is needed.
+    private void EnsureSpatialGrid()
+    {
+        if (_spatialGrid != null)
+            return;
+        float spanX = BoundsMax.X - BoundsMin.X;
+        float spanZ = BoundsMax.Z - BoundsMin.Z;
+        _sgCellsX = Math.Max(1, (int)MathF.Ceiling(spanX / SpatialGridCell));
+        _sgCellsZ = Math.Max(1, (int)MathF.Ceiling(spanZ / SpatialGridCell));
+        _sgOriginX = BoundsMin.X;
+        _sgOriginZ = BoundsMin.Z;
+        _spatialGrid = new List<int>[_sgCellsX * _sgCellsZ];
+        for (int i = 0; i < _spatialGrid.Length; i++)
+            _spatialGrid[i] = new List<int>();
+        for (int qi = 0; qi < Quads.Count; qi++)
+        {
+            var q = Quads[qi];
+            int x0 = GridCell(q.MinX - _sgOriginX, _sgCellsX);
+            int x1 = GridCell(q.MaxX - _sgOriginX, _sgCellsX);
+            int z0 = GridCell(q.MinZ - _sgOriginZ, _sgCellsZ);
+            int z1 = GridCell(q.MaxZ - _sgOriginZ, _sgCellsZ);
+            for (int gz = z0; gz <= z1; gz++)
+                for (int gx = x0; gx <= x1; gx++)
+                    _spatialGrid[gz * _sgCellsX + gx].Add(qi);
+        }
+    }
+
+    private int GridCell(float v, int maxCell)
+        => Math.Clamp((int)(v / SpatialGridCell), 0, maxCell - 1);
+
+    // C3: probe the grid cell at p and a small neighbourhood; return nearest XZ-
+    // containing quad (nearest Y) or nearest-center quad if none contains.
+    private int NearestQuadSpatial(Vector3 p)
+    {
+        EnsureSpatialGrid();
+        int gx = GridCell(p.X - _sgOriginX, _sgCellsX);
+        int gz = GridCell(p.Z - _sgOriginZ, _sgCellsZ);
+
+        int best = -1;
+        float bestDist = float.MaxValue;
+        const int Radius = 2;
+        for (int dz = -Radius; dz <= Radius; dz++)
+        {
+            for (int dx = -Radius; dx <= Radius; dx++)
+            {
+                int cx = gx + dx, cz = gz + dz;
+                if (cx < 0 || cx >= _sgCellsX || cz < 0 || cz >= _sgCellsZ)
+                    continue;
+                var cell = _spatialGrid![cz * _sgCellsX + cx];
+                foreach (int qi in cell)
+                {
+                    var q = Quads[qi];
+                    if (q.ContainsXZ(p))
+                    {
+                        float dy = MathF.Abs(p.Y - q.MinY);
+                        if (dy < bestDist) { bestDist = dy; best = qi; }
+                    }
+                }
+            }
+        }
+        if (best >= 0)
+            return best;
+
+        // No XZ-containing quad in neighbourhood: fall back to nearest-center
+        // in a wider search.
+        bestDist = float.MaxValue;
+        for (int dz = -Radius; dz <= Radius; dz++)
+        {
+            for (int dx = -Radius; dx <= Radius; dx++)
+            {
+                int cx = gx + dx, cz = gz + dz;
+                if (cx < 0 || cx >= _sgCellsX || cz < 0 || cz >= _sgCellsZ)
+                    continue;
+                var cell = _spatialGrid![cz * _sgCellsX + cx];
+                foreach (int qi in cell)
+                {
+                    var q = Quads[qi];
+                    float d = (q.Center - p).LengthSquared();
+                    if (d < bestDist) { bestDist = d; best = qi; }
+                }
+            }
+        }
+        // If still -1 (point outside grid entirely), signal fallback to full scan.
+        return best;
+    }
+
     public HashSet<int> FloodReachable(IEnumerable<int> seeds)
     {
+        // C4: pre-index off-mesh portals by FromQuad to avoid O(nodes*portals) scan.
+        var offMeshByFrom = new Dictionary<int, List<int>>();
+        foreach (var portal in Portals)
+        {
+            if (!portal.IsOffMesh) continue;
+            if (!offMeshByFrom.TryGetValue(portal.FromQuad, out var list))
+                offMeshByFrom[portal.FromQuad] = list = new List<int>();
+            list.Add(portal.ToQuad);
+        }
+
         var result = new HashSet<int>();
         var queue = new Queue<int>();
         foreach (var s in seeds)
@@ -319,10 +449,13 @@ public class QuadGraph
                 if (result.Add(neighbor))
                     queue.Enqueue(neighbor);
             }
-            foreach (var portal in Portals)
+            if (offMeshByFrom.TryGetValue(cur, out var toQuads))
             {
-                if (portal.IsOffMesh && portal.FromQuad == cur && result.Add(portal.ToQuad))
-                    queue.Enqueue(portal.ToQuad);
+                foreach (var toQuad in toQuads)
+                {
+                    if (result.Add(toQuad))
+                        queue.Enqueue(toQuad);
+                }
             }
         }
         return result;
@@ -345,6 +478,7 @@ public class QuadGraph
     {
         Flags = new int[Quads.Count];
         _cachedPolyMesh = null;
+        _spatialGrid = null; // C3: invalidate spatial index
     }
 
     public List<Vector3> Pathfind(Vector3 from, Vector3 to, bool useRaycast, bool useStringPulling, float range, System.Threading.CancellationToken cancel)

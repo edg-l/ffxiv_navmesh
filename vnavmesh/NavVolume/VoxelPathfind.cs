@@ -49,7 +49,7 @@ public class VoxelPathfind
     public void Start(ulong fromVoxel, ulong toVoxel, Vector3 fromPos, Vector3 toPos)
     {
         _nodes.Clear();
-        InitLookup(4096);
+        InitLookup(65536); // H6: avoid mid-search rehashes on large zones
         _openList.Clear();
         _bestNodeIndex = 0;
         if (fromVoxel == VoxelMap.InvalidVoxel || toVoxel == VoxelMap.InvalidVoxel)

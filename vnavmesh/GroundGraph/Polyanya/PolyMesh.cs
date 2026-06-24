@@ -35,6 +35,9 @@ public class PolyMesh
     // up per-quad flags (e.g. FLAG_UNREACHABLE) during search so Polyanya can
     // skip faces whose source quad is flagged. -1 for faces not from a quad.
     public List<int> SourceQuad = new();
+    // B1: per-quad face list for fast start/goal face lookup. FacesByQuad[qi]
+    // is the list of triangle face indices whose SourceQuad == qi.
+    public List<int>[]? FacesByQuad;
 
     public int AddVertex(Vector3 v)
     {
@@ -248,6 +251,10 @@ public class PolyMesh
             throw new InvalidOperationException(
                 $"Off-mesh link count mismatch: graph had {offMeshCount} off-mesh portals, mesh has {mesh.OffMeshLinks.Count} links");
 
+        // B1: store the quad->faces mapping built above so PolyanyaSearch can
+        // do O(1) start/goal face lookups without scanning all faces.
+        mesh.FacesByQuad = quadFaces;
+
         return mesh;
     }
 
@@ -395,9 +402,12 @@ public class PolyMesh
     }
 
     // Find the face in `faces` whose triangle (XZ projection) contains (x, z).
-    // Falls back to faces[0] if no face contains the point (e.g. point on boundary).
+    // B2: falls back to the face whose centroid is nearest when none strictly
+    // contains the point (e.g. point on boundary).
     private static int FindFaceContainingPoint(PolyMesh mesh, List<int> faces, float x, float z)
     {
+        int best = faces[0];
+        float bestDistSq = float.MaxValue;
         foreach (int f in faces)
         {
             var face = mesh.Faces[f];
@@ -406,8 +416,14 @@ public class PolyMesh
             var vc = mesh.Vertices[face.V2];
             if (PointInTriangleXZ(x, z, va, vb, vc))
                 return f;
+            // Track nearest centroid as fallback.
+            float cx = (va.X + vb.X + vc.X) / 3f;
+            float cz = (va.Z + vb.Z + vc.Z) / 3f;
+            float dx = cx - x, dz = cz - z;
+            float distSq = dx * dx + dz * dz;
+            if (distSq < bestDistSq) { bestDistSq = distSq; best = f; }
         }
-        return faces[0];
+        return best;
     }
 
     // Test if (x, z) is inside or on the boundary of triangle (a, b, c) in XZ.

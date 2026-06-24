@@ -82,7 +82,8 @@ public class VoxelMap
         public (int x, int y, int z) WorldToVoxel(Vector3 v)
         {
             var frac = (v - BoundsMin) * LevelDesc.InvCellSize;
-            return ((int)frac.X, (int)frac.Y, (int)frac.Z);
+            // H5: use Floor so negative fracs round toward -∞ (not toward 0).
+            return ((int)MathF.Floor(frac.X), (int)MathF.Floor(frac.Y), (int)MathF.Floor(frac.Z));
         }
         public Vector3 VoxelToWorld(int x, int y, int z) => BoundsMin + new Vector3(x + 0.5f, y + 0.5f, z + 0.5f) * LevelDesc.CellSize;
         public Vector3 VoxelToWorld((int x, int y, int z) v) => VoxelToWorld(v.x, v.y, v.z);

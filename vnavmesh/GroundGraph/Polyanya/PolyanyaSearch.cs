@@ -47,17 +47,23 @@ public class PolyanyaSearch
         public Vector2 B;          // interval endpoint B (edge param)
         public float F;            // priority = GRoot + dist(root->closest) + h
         public int Parent;         // index into _nodes for path reconstruction
-        public int OpenHeapIndex;  // -1 if closed/not in open
+        public int OpenHeapIndex;  // -1 = not in open, -2 = closed
         public bool IsGoal;        // observable-to-target node (terminal)
         public Vector2 GoalPoint;  // the target point (for IsGoal nodes)
     }
 
     private readonly List<Node> _nodes = new();
     private readonly List<int> _open = new();
+    // A2: per-face off-mesh link index built once in ctor.
+    private readonly Dictionary<int, List<int>> _offMeshByFace = new();
+    // A1: closed-interval map for O(1) intermediate pruning.
+    private readonly Dictionary<(int face, int edge), float> _closedG = new();
     private int _bestGoal = -1;
     private Vector2 _target;
     private float _targetY;
     private float _goalRange;
+    // A6: cached goal face resolved at start of FindPath. -1 = unknown.
+    private int _goalFace = -1;
     // Source-quad ids resolved 3D-aware by QuadGraph.NearestQuad. -1 = unknown
     // (geometric fallback). Used to seed the search on the correct Y-layer and
     // to accept goal faces only on the target's quad, so a stacked face that
@@ -68,6 +74,14 @@ public class PolyanyaSearch
     public PolyanyaSearch(PolyMesh mesh)
     {
         _mesh = mesh;
+        // A2: build face->off-mesh-link-indices index once.
+        for (int i = 0; i < mesh.OffMeshLinks.Count; i++)
+        {
+            int face = mesh.OffMeshLinks[i].FromFace;
+            if (!_offMeshByFace.TryGetValue(face, out var list))
+                _offMeshByFace[face] = list = new List<int>();
+            list.Add(i);
+        }
     }
 
     // Set the per-source-quad flags array used to skip unreachable faces during
@@ -104,6 +118,7 @@ public class PolyanyaSearch
         _goalQuad = toQuad;
         _nodes.Clear();
         _open.Clear();
+        _closedG.Clear(); // A1
         _bestGoal = -1;
         _expandedCount = 0;
         _goalPushCount = 0;
@@ -115,6 +130,9 @@ public class PolyanyaSearch
         int startFace = FindStartFace(new Vector2(from.X, from.Z), from.Y);
         if (startFace < 0)
             return [];
+
+        // A6: resolve goal face once so IsGoalFace is an O(1) comparison.
+        _goalFace = FindGoalFace(new Vector2(to.X, to.Z), to.Y);
 
         // Seed: the root is `from` itself, inside the start face. The initial
         // "interval" is the whole face (we model this as a sentinel node whose
@@ -144,7 +162,7 @@ public class PolyanyaSearch
         return ReconstructPath(_bestGoal, from, to);
     }
 
-    private void Execute(CancellationToken cancel, int maxSteps = 2_000_000)
+    private void Execute(CancellationToken cancel, int maxSteps = int.MaxValue) // A4: no silent truncation
     {
         for (int i = 0; i < maxSteps; ++i)
         {
@@ -153,27 +171,42 @@ public class PolyanyaSearch
             int nodeIdx = PopMinOpen();
             ref var node = ref CollectionsMarshal.AsSpan(_nodes)[nodeIdx];
 
-            // If this is a goal node, record it and keep the best (lowest g).
+            // A3: solution-bounded termination. Once a goal is found, the optimal
+            // total cost is >= the f of any node still on the open list (f lower-
+            // bounds the cost of any goal reached through it). So as soon as the
+            // min-f popped node has f >= the best goal's cost, no open node can
+            // improve on it — stop. This is optimal even if a goal's non-observable
+            // bend cost made an earlier-popped goal slightly suboptimal, while
+            // still turning a full-component exploration (~1.9M expansions) into a
+            // goal-bounded one (~1k). Small epsilon guards float noise.
+            if (_bestGoal >= 0 && node.F + 1e-4f >= _nodes[_bestGoal].GRoot)
+                return;
+
             if (node.IsGoal)
             {
                 if (_bestGoal < 0 || node.GRoot < _nodes[_bestGoal].GRoot)
                     _bestGoal = nodeIdx;
-                // A goal node has no further successors.
                 continue;
             }
 
-            // Already-expanded nodes are skipped (lazy deletion). Mark closed.
-            if (node.OpenHeapIndex != -2)
+            // A5: skip already-closed nodes (lazy deletion).
+            if (node.OpenHeapIndex == -2)
+                continue;
+
+            // Mark closed and record in closed-g map (A1): keep the minimum g seen.
+            node.OpenHeapIndex = -2;
+            if (node.Edge >= 0)
             {
-                // not closed yet; process
+                var key = (node.Face, node.Edge);
+                if (!_closedG.TryGetValue(key, out var existing) || node.GRoot < existing)
+                    _closedG[key] = node.GRoot;
             }
-            node.OpenHeapIndex = -2; // closed
 
             if ((i & 0x3ff) == 0)
                 cancel.ThrowIfCancellationRequested();
 
             Expand(nodeIdx);
-        _expandedCount++;
+            _expandedCount++;
         }
     }
 
@@ -418,21 +451,36 @@ public class PolyanyaSearch
         PushInterval(parent, neighbour, entryEdge, a, b, root, gRoot);
     }
 
-    // Intermediate pruning helper (§4.2): returns true if there is already a
-    // closed node for (face, edge) with g <= the candidate's g. A closed node
-    // has OpenHeapIndex == -2. We scan _nodes linearly; the search is bounded
-    // by maxSteps and the mesh is small (synthetic tests), so this is acceptable.
-    // For a production-sized mesh, a (face,edge)->nodeIndex map would be added.
+    // Intermediate pruning helper (§4.2): O(1) via _closedG dictionary (A1).
     private bool HasClosedInterval(int face, int edge, float gRoot)
+        => _closedG.TryGetValue((face, edge), out var best) && best <= gRoot + 0.0001f;
+
+    // The shortest distance from `root` to `target` that touches segment [a,b]:
+    // min over p in [a,b] of (|root-p| + |p-target|). This is an admissible lower
+    // bound on any path from root through the interval to target. If the straight
+    // root->target segment crosses [a,b], it's |root-target|. Otherwise the taut
+    // path bends on the segment; reflect target across the segment's line — the
+    // straight root->target' crossing gives the optimal interior bend, else the
+    // minimum is at an endpoint.
+    private static float IntervalLowerBound(Vector2 root, Vector2 target, Vector2 a, Vector2 b)
     {
-        var span = CollectionsMarshal.AsSpan(_nodes);
-        for (int i = 0; i < span.Length; ++i)
-        {
-            ref var n = ref span[i];
-            if (n.OpenHeapIndex == -2 && n.Face == face && n.Edge == edge && n.GRoot <= gRoot + 0.0001f)
-                return true;
-        }
-        return false;
+        if (SegmentSegmentIntersect(root, target, a, b, out _))
+            return Vector2.Distance(root, target);
+
+        var ab = b - a;
+        float len2 = ab.LengthSquared();
+        if (len2 < 1e-9f)
+            return Vector2.Distance(root, a) + Vector2.Distance(a, target);
+
+        float t = Vector2.Dot(target - a, ab) / len2;
+        var proj = a + ab * t;
+        var targetRefl = 2f * proj - target;
+        if (SegmentSegmentIntersect(root, targetRefl, a, b, out _))
+            return Vector2.Distance(root, targetRefl); // = |root-p*| + |p*-target|
+
+        float viaA = Vector2.Distance(root, a) + Vector2.Distance(a, target);
+        float viaB = Vector2.Distance(root, b) + Vector2.Distance(b, target);
+        return MathF.Min(viaA, viaB);
     }
 
     private void PushInterval(int parent, int face, int edge, Vector2 a, Vector2 b, Vector2 root, float gRoot)
@@ -469,8 +517,15 @@ public class PolyanyaSearch
             // range goal has a lower f (no h) and will be popped first.
         }
 
-        float h = Vector2.Distance(closest, _target);
-        float f = gRoot + distToInterval + h * 0.999f;
+        // Admissible Polyanya estimate (§3.2): the priority is g(root) plus the
+        // shortest distance from root to target that TOUCHES the interval [a,b],
+        // i.e. min over p in [a,b] of |root-p| + |p-target|. Using a single fixed
+        // point (closest-to-root) for both legs overestimates this and makes the
+        // heuristic inadmissible, which breaks goal-bounded termination (it would
+        // return paths up to ~11% long). The taut distance below is a true lower
+        // bound on any real path through this interval, so the first goal whose
+        // cost bounds the open list is optimal. 0.999 keeps it strictly under.
+        float f = gRoot + IntervalLowerBound(root, _target, a, b) * 0.999f;
         var node = new Node
         {
             Root = root,
@@ -494,12 +549,17 @@ public class PolyanyaSearch
     // with a fresh root at toPos (XZ).
     private void PushOffMeshSuccessors(int parent, int face, Vector2 root)
     {
-        ref var p = ref CollectionsMarshal.AsSpan(_nodes)[parent];
-        for (int i = 0; i < _mesh.OffMeshLinks.Count; ++i)
+        // A8: copy GRoot into a local BEFORE any _nodes.Add() calls that could
+        // invalidate a ref into the List backing store.
+        float parentGRoot = _nodes[parent].GRoot;
+
+        // A2: iterate only the links for this face using the pre-built index.
+        if (!_offMeshByFace.TryGetValue(face, out var linkIndices))
+            return;
+
+        for (int li = 0; li < linkIndices.Count; li++)
         {
-            var link = _mesh.OffMeshLinks[i];
-            if (link.FromFace != face)
-                continue;
+            var link = _mesh.OffMeshLinks[linkIndices[li]];
             if (!FaceIsReachable(link.FromFace) || !FaceIsReachable(link.ToFace))
                 continue;
             float areaMult = AreaMultiplier(link.Area);
@@ -507,7 +567,7 @@ public class PolyanyaSearch
             float linkCost = linkDist3D * areaMult;
             // Distance from root to the link's fromPos (within the face).
             float approach = Vector2.Distance(root, new Vector2(link.FromPos.X, link.FromPos.Z));
-            float gRootNew = p.GRoot + approach + linkCost;
+            float gRootNew = parentGRoot + approach + linkCost; // A8: use local
             Vector2 newRoot = new(link.ToPos.X, link.ToPos.Z);
             // The link lands in toFace; seed a fresh expansion from there.
             float h = Vector2.Distance(newRoot, _target);
@@ -536,24 +596,52 @@ public class PolyanyaSearch
 
     // ---- Geometry helpers ----
 
-    // A face qualifies as a goal iff it geometrically contains the target in XZ
-    // AND (when known) belongs to the target's resolved quad. The quad gate
-    // prevents accepting a face that overlaps the target's XZ but sits on a
-    // different Y-layer (multi-level geometry).
+    // A face qualifies as a goal iff it is the resolved goal face (A6), OR it
+    // also contains the target in XZ (handles boundary cases where the target
+    // lies on a shared edge). When _goalFace >= 0, the primary check is O(1);
+    // the FaceContainsXZ fallback is only paid for faces adjacent to _goalFace.
     private bool IsGoalFace(int face)
     {
-        if (_goalQuad >= 0 && _mesh.SourceQuad[face] != _goalQuad)
-            return false;
+        if (_goalFace >= 0)
+        {
+            if (face == _goalFace)
+                return true;
+            // Boundary case: target may lie on the edge between _goalFace and this face.
+            if (_goalQuad >= 0 && _mesh.SourceQuad[face] != _goalQuad)
+                return false;
+            return FaceContainsXZ(face, _target);
+        }
+        // No quad hint: geometric check.
         return FaceContainsXZ(face, _target);
     }
 
-    // Resolve the seed face. Prefer faces of the resolved start quad (3D-aware),
-    // then a face that contains `p` in XZ, otherwise the nearest floor-Y. Falls
-    // back to a Y-aware geometric scan when no quad hint is available.
+    // Resolve the seed face. Prefer faces of the resolved start quad (3D-aware)
+    // using the FacesByQuad index (A7), then a face that contains `p` in XZ,
+    // otherwise the nearest floor-Y. Falls back to a Y-aware geometric scan.
     private int FindStartFace(Vector2 p, float y)
     {
-        if (_startQuad >= 0)
+        if (_startQuad >= 0 && _mesh.FacesByQuad != null && _startQuad < _mesh.FacesByQuad.Length)
         {
+            var faces = _mesh.FacesByQuad[_startQuad];
+            if (faces != null)
+            {
+                int contains = -1, nearest = -1;
+                float bestContainsDY = float.MaxValue, bestNearestDY = float.MaxValue;
+                foreach (int i in faces)
+                {
+                    if (!FaceIsReachable(i))
+                        continue;
+                    float dy = MathF.Abs(_mesh.Faces[i].Y - y);
+                    if (FaceContainsXZ(i, p) && dy < bestContainsDY) { bestContainsDY = dy; contains = i; }
+                    if (dy < bestNearestDY) { bestNearestDY = dy; nearest = i; }
+                }
+                if (contains >= 0) return contains;
+                if (nearest >= 0) return nearest;
+            }
+        }
+        else if (_startQuad >= 0)
+        {
+            // FacesByQuad not available: fall back to full scan.
             int contains = -1, nearest = -1;
             float bestContainsDY = float.MaxValue, bestNearestDY = float.MaxValue;
             for (int i = 0; i < _mesh.Faces.Count; ++i)
@@ -567,6 +655,47 @@ public class PolyanyaSearch
             if (contains >= 0) return contains;
             if (nearest >= 0) return nearest;
         }
+        return FindFaceContaining(p, y);
+    }
+
+    // A6: Resolve the goal face for O(1) IsGoalFace checks during search.
+    // Uses FacesByQuad index when available.
+    private int FindGoalFace(Vector2 p, float y)
+    {
+        if (_goalQuad >= 0 && _mesh.FacesByQuad != null && _goalQuad < _mesh.FacesByQuad.Length)
+        {
+            var faces = _mesh.FacesByQuad[_goalQuad];
+            if (faces != null)
+            {
+                int contains = -1, nearest = -1;
+                float bestContainsDY = float.MaxValue, bestNearestDY = float.MaxValue;
+                foreach (int i in faces)
+                {
+                    if (!FaceIsReachable(i)) continue;
+                    float dy = MathF.Abs(_mesh.Faces[i].Y - y);
+                    if (FaceContainsXZ(i, p) && dy < bestContainsDY) { bestContainsDY = dy; contains = i; }
+                    if (dy < bestNearestDY) { bestNearestDY = dy; nearest = i; }
+                }
+                if (contains >= 0) return contains;
+                if (nearest >= 0) return nearest;
+            }
+        }
+        else if (_goalQuad >= 0)
+        {
+            // FacesByQuad not available: full scan for goal quad.
+            int contains = -1, nearest = -1;
+            float bestContainsDY = float.MaxValue, bestNearestDY = float.MaxValue;
+            for (int i = 0; i < _mesh.Faces.Count; ++i)
+            {
+                if (_mesh.SourceQuad[i] != _goalQuad || !FaceIsReachable(i)) continue;
+                float dy = MathF.Abs(_mesh.Faces[i].Y - y);
+                if (FaceContainsXZ(i, p) && dy < bestContainsDY) { bestContainsDY = dy; contains = i; }
+                if (dy < bestNearestDY) { bestNearestDY = dy; nearest = i; }
+            }
+            if (contains >= 0) return contains;
+            if (nearest >= 0) return nearest;
+        }
+        // No quad hint: geometric fallback.
         return FindFaceContaining(p, y);
     }
 
@@ -736,12 +865,14 @@ public class PolyanyaSearch
     private void AddToOpen(int nodeIndex)
     {
         ref var node = ref CollectionsMarshal.AsSpan(_nodes)[nodeIndex];
-        if (node.OpenHeapIndex < 0)
+        // A5: only add if not yet in open (-1); never re-add a closed node (-2).
+        if (node.OpenHeapIndex == -1)
         {
             node.OpenHeapIndex = _open.Count;
             _open.Add(nodeIndex);
         }
-        PercolateUp(node.OpenHeapIndex);
+        if (node.OpenHeapIndex >= 0)
+            PercolateUp(node.OpenHeapIndex);
     }
 
     private int PopMinOpen()

@@ -79,8 +79,6 @@ public class NavmeshBuilder
 
     public void BuildTiles(Action? onTileFinished = null)
     {
-        var tasks = new List<Task<(VoxelMap? tileVolume, CompactHeightfield? tileCHF, int tileX, int tileZ)>>();
-
         int threadCount;
 
         var maxThreads = Environment.ProcessorCount;
@@ -91,46 +89,40 @@ public class NavmeshBuilder
             threadCount = wantedThreads;
         threadCount = Math.Clamp(threadCount, 1, maxThreads);
 
-        var sem = new SemaphoreSlim(threadCount, threadCount);
+        // D1: use Parallel.ForEachAsync with bounded parallelism instead of
+        // submitting all tasks up-front with a semaphore, which would create
+        // NumTilesX*NumTilesZ blocked threads when threadCount==1 (~255 threads).
+        int totalTiles = NumTilesX * NumTilesZ;
+        var tileResults = new (VoxelMap? tileVolume, CompactHeightfield? tileCHF, int tileX, int tileZ)[totalTiles];
 
-        for (var z = 0; z < NumTilesZ; z++)
+        var tileCoords = new List<(int x, int z)>(totalTiles);
+        for (int z = 0; z < NumTilesZ; z++)
+            for (int x = 0; x < NumTilesX; x++)
+                tileCoords.Add((x, z));
+
+        var options = new ParallelOptions { MaxDegreeOfParallelism = threadCount };
+        Parallel.ForEach(tileCoords, options, coord =>
         {
-            for (var x = 0; x < NumTilesX; x++)
+            var (x0, z0) = coord;
+            var (vox, chf, tileX, tileZ) = BuildTile(x0, z0);
+
+            VoxelMap? tileVolume = null;
+            if (vox != null)
             {
-                var z0 = z;
-                var x0 = x;
-                tasks.Add(Task.Run(async () =>
-                {
-                    await sem.WaitAsync();
-                    try
-                    {
-                        var (vox, chf, tileX, tileZ) = BuildTile(x0, z0);
-
-                        VoxelMap? tileVolume = null;
-                        if (vox != null)
-                        {
-                            tileVolume = new VoxelMap(BoundsMin, BoundsMax, Settings.NumTiles);
-                            tileVolume.Build(vox, x0, z0);
-                        }
-
-                        onTileFinished?.Invoke();
-                        return (tileVolume, chf, tileX, tileZ);
-                    }
-                    finally
-                    {
-                        sem.Release();
-                    }
-                }));
+                tileVolume = new VoxelMap(BoundsMin, BoundsMax, Settings.NumTiles);
+                tileVolume.Build(vox, x0, z0);
             }
-        }
+
+            int idx = z0 * NumTilesX + x0;
+            tileResults[idx] = (tileVolume, chf, tileX, tileZ);
+            onTileFinished?.Invoke();
+        });
 
         // Collect per-tile results. VoxelMap tiles are merged into the global volume;
         // CHFs are stitched together into a single merged CHF for ground extraction.
         var tileCHFs = new List<(CompactHeightfield chf, int tileX, int tileZ)>();
-        foreach (var t in tasks)
+        foreach (var (tileVolume, tileCHF, tileX, tileZ) in tileResults)
         {
-            t.Wait();
-            var (tileVolume, tileCHF, tileX, tileZ) = t.Result;
             if (Navmesh.Volume != null && tileVolume != null)
                 MergeTile(Navmesh.Volume, tileX, tileZ, tileVolume);
             if (tileCHF != null)

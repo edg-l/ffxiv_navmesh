@@ -42,8 +42,10 @@ public class CompactHeightfield
     // using world units avoids floor-rounding errors from voxel-count conversion.
     public float WalkableClimbWorld { get; }
 
-    // Per-column span lists; index = z * Width + x.
-    private readonly List<FloorSpan>[] _columns;
+    // F1: per-column span lists; index = z * Width + x. Nullable for lazy alloc.
+    private readonly List<FloorSpan>?[] _columns;
+    // Shared empty list returned by GetSpans for uninitialized (empty) columns.
+    private static readonly IReadOnlyList<FloorSpan> _emptySpans = Array.Empty<FloorSpan>();
 
     public CompactHeightfield(Vector3 boundsMin, float cellSize, float cellHeight,
         int width, int height, int borderSize, int walkableClimbVoxels, float walkableClimbWorld = -1f)
@@ -56,9 +58,8 @@ public class CompactHeightfield
         BorderSize = borderSize;
         WalkableClimbVoxels = walkableClimbVoxels;
         WalkableClimbWorld = walkableClimbWorld > 0f ? walkableClimbWorld : walkableClimbVoxels * cellHeight;
-        _columns = new List<FloorSpan>[width * height];
-        for (int i = 0; i < _columns.Length; i++)
-            _columns[i] = new List<FloorSpan>();
+        // F1: allocate the outer array only; inner lists are lazily created.
+        _columns = new List<FloorSpan>?[width * height];
     }
 
     // Add a floor span to the column at (x, z). Spans should be added in top-Y
@@ -66,7 +67,10 @@ public class CompactHeightfield
     // are added. Alternatively, call AddSpanSorted to insert in sorted order.
     public void AddSpanSorted(int x, int z, float floorY, byte area)
     {
-        var col = _columns[z * Width + x];
+        int ci = z * Width + x;
+        // F1: lazily allocate the column list on first use.
+        _columns[ci] ??= new List<FloorSpan>();
+        var col = _columns[ci]!;
         // Insert sorted by floorY ascending, with clearance computed after.
         int ins = col.Count;
         for (int i = 0; i < col.Count; i++)
@@ -87,6 +91,7 @@ public class CompactHeightfield
     {
         foreach (var col in _columns)
         {
+            if (col == null) continue; // F1: skip empty columns
             for (int i = 0; i < col.Count; i++)
             {
                 float clearance = i + 1 < col.Count
@@ -97,11 +102,16 @@ public class CompactHeightfield
         }
     }
 
-    // Return spans for cell (x, z). Empty if no walkable surface found there.
-    public IReadOnlyList<FloorSpan> GetSpans(int x, int z) => _columns[z * Width + x];
+    // Return spans for cell (x, z). F1: returns empty for null (uninitialized) columns.
+    public IReadOnlyList<FloorSpan> GetSpans(int x, int z) => _columns[z * Width + x] ?? _emptySpans;
 
-    // Internal mutable access for seam healing (same assembly only).
-    internal List<FloorSpan> GetSpansMutable(int x, int z) => _columns[z * Width + x];
+    // Internal mutable access for seam healing (same assembly only). F1: allocates lazily.
+    internal List<FloorSpan> GetSpansMutable(int x, int z)
+    {
+        int ci = z * Width + x;
+        _columns[ci] ??= new List<FloorSpan>();
+        return _columns[ci]!;
+    }
 
     // Convert world X coordinate to cell X index (clamped to [0, Width-1]).
     public int WorldToCell_X(float worldX)
@@ -146,16 +156,16 @@ public class CompactHeightfield
             origin, leafCellSize.X, leafCellSize.Y,
             totalCellsX, totalCellsZ, 0, climbVoxels, agentMaxClimb);
 
+        // F2: hoist totalCellsY computation out of the per-(x,z) loop.
+        int totalCellsY = 1;
+        foreach (var lvl in volume.Levels)
+            totalCellsY *= lvl.NumCellsY;
+
         // Scan all leaf voxels: empty above solid → walkable floor.
         for (int z = 0; z < totalCellsZ; z++)
         {
             for (int x = 0; x < totalCellsX; x++)
             {
-                // Probe downward from the top of the scene to find surfaces.
-                int totalCellsY = 1;
-                foreach (var lvl in volume.Levels)
-                    totalCellsY *= lvl.NumCellsY;
-
                 for (int y = totalCellsY - 1; y > 0; y--)
                 {
                     var probePos = origin + new Vector3((x + 0.5f) * leafCellSize.X, (y + 0.5f) * leafCellSize.Y, (z + 0.5f) * leafCellSize.Z);

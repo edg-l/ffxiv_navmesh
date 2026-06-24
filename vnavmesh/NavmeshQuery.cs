@@ -83,7 +83,9 @@ public class NavmeshQuery
 		else
 		{
 			var res = voxelPath.Select(r => new Waypoint(r.p)).ToList();
-			res.Add(new(to));
+			// H4: only append `to` if it differs from the last waypoint.
+			if (res.Count == 0 || Vector3.DistanceSquared(res[^1].Position, to) > 1e-8f)
+				res.Add(new(to));
 			return res;
 		}
 	}
