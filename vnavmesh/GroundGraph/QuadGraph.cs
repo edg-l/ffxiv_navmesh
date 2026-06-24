@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Numerics;
+using Navmesh.GroundGraph.Polyanya;
 
 namespace Navmesh.GroundGraph;
 
@@ -15,6 +16,12 @@ public class QuadGraph
     public Vector3 BoundsMin;
     public Vector3 BoundsMax;
     public float MaxClimb;
+
+    // Cached PolyMesh derived from this graph's quads/portals/adjacency. Built
+    // lazily on the first Pathfind call; invalidated whenever BuildAdjacency or
+    // InitFlags runs (the mesh's face<->quad mapping would be stale). Valid as
+    // long as Quads/Portals/Adjacency don't change.
+    private PolyMesh? _cachedPolyMesh;
 
     public int Count => Quads.Count;
 
@@ -75,6 +82,7 @@ public class QuadGraph
     public void BuildAdjacency(float maxClimb, float agentRadius = 0f)
     {
         MaxClimb = maxClimb;
+        _cachedPolyMesh = null;
         for (int i = 0; i < Quads.Count; ++i)
             Adjacency[i].Clear();
         Portals.Clear();
@@ -256,6 +264,7 @@ public class QuadGraph
     public void InitFlags()
     {
         Flags = new int[Quads.Count];
+        _cachedPolyMesh = null;
     }
 
     public List<Vector3> Pathfind(Vector3 from, Vector3 to, bool useRaycast, bool useStringPulling, float range, System.Threading.CancellationToken cancel)
@@ -265,32 +274,23 @@ public class QuadGraph
         var fromReachable = fromQuad >= 0 && fromQuad < Flags.Length && (Flags[fromQuad] & FLAG_UNREACHABLE) == 0;
         var toReachable = toQuad >= 0 && toQuad < Flags.Length && (Flags[toQuad] & FLAG_UNREACHABLE) == 0;
         Service.Log.Debug($"[pathfind] quad {fromQuad} -> {toQuad} (of {Quads.Count} quads, {Portals.Count} portals; fromReachable={fromReachable}, toReachable={toReachable})");
-        if (fromQuad < 0 || toQuad < 0)
+        if (fromQuad < 0 || toQuad < 0 || !fromReachable || !toReachable)
             return [];
 
-        var pathfinder = new QuadPathfind(this);
-        var path = range > 0
-            ? pathfinder.FindPathWithRange(fromQuad, toQuad, from, to, range, useRaycast, cancel)
-            : pathfinder.FindPath(fromQuad, toQuad, from, to, useRaycast, cancel);
-
-        Service.Log.Debug($"[pathfind] A* returned {path.Count} nodes");
-        if (path.Count == 0)
-            return [];
-
-        if (useStringPulling)
-        {
-            var simplified = FunnelStringPull.Pull(this, path, from, to);
-            Service.Log.Debug($"[pathfind] funnel returned {simplified.Count} waypoints");
-            return simplified;
-        }
-        else
-        {
-            var res = new List<Vector3> { from };
-            foreach (var (_, p) in path)
-                res.Add(p);
-            res.Add(to);
-            return res;
-        }
+        // Build (or reuse) the triangle PolyMesh derived from this graph. The
+        // mesh is any-angle by construction, so `useStringPulling` is a no-op
+        // (accepted for IPC compatibility; Polyanya already produces taut paths).
+        // `useRaycast` is likewise accepted but ignored: any-angle search
+        // supersedes raycast shortcutting. range semantics are forwarded to
+        // PolyanyaSearch (range>0 terminates within range of goal; range==0
+        // = exact goal).
+        var mesh = _cachedPolyMesh ??= PolyMesh.FromQuadGraph(this);
+        var search = new PolyanyaSearch(mesh);
+        if (Flags.Length > 0)
+            search.SetQuadFlags(Flags, FLAG_UNREACHABLE);
+        var path = search.FindPath(from, to, range, cancel);
+        Service.Log.Debug($"[pathfind] polyanya returned {path.Count} waypoints");
+        return path;
     }
 }
 

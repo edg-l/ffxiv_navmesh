@@ -214,6 +214,69 @@ public class VoxelMap
 
     public (ulong voxel, bool empty) FindLeafVoxel(Vector3 p) => RootTile.FindLeafVoxel(p);
 
+    public void FillBox(Vector3 min, Vector3 max)
+    {
+        FillBoxTile(RootTile, min, max);
+    }
+
+    private void FillBoxTile(Tile tile, Vector3 min, Vector3 max)
+    {
+        var ld = tile.LevelDesc;
+        var isLeaf = tile.Level == Levels.Length - 1;
+
+        // Compute which cells in this tile overlap with [min, max].
+        // Use a slightly expanded range to ensure we visit all overlapping cells.
+        var vmin = ld.ClampMin(tile.WorldToVoxel(min));
+        var vmax = ld.ClampMax(tile.WorldToVoxel(max));
+
+        for (int z = vmin.z; z <= vmax.z; z++)
+        {
+            for (int x = vmin.x; x <= vmax.x; x++)
+            {
+                for (int y = vmin.y; y <= vmax.y; y++)
+                {
+                    var idx = ld.VoxelToIndex(x, y, z);
+                    var data = tile.Contents[idx];
+
+                    if (isLeaf)
+                    {
+                        // At leaf level: only mark solid if the voxel center is in [min, max].
+                        var center = tile.VoxelToWorld(x, y, z);
+                        if (center.X >= min.X && center.X <= max.X &&
+                            center.Y >= min.Y && center.Y <= max.Y &&
+                            center.Z >= min.Z && center.Z <= max.Z)
+                        {
+                            tile.Contents[idx] = VoxelOccupiedBit | VoxelIdMask;
+                        }
+                    }
+                    else
+                    {
+                        var subIdx = data & VoxelIdMask;
+                        if ((data & VoxelOccupiedBit) == 0)
+                        {
+                            // empty — create a new subdivision tile and recurse
+                            var newSubIdx = (ushort)tile.Subdivision.Count;
+                            tile.Contents[idx] = (ushort)(VoxelOccupiedBit | newSubIdx);
+                            var (subMin, subMax) = tile.CalculateSubdivisionBounds(x, y, z);
+                            var subTile = new Tile(this, subMin, subMax, tile.Level + 1);
+                            tile.Subdivision.Add(subTile);
+                            FillBoxTile(subTile, min, max);
+                        }
+                        else if (subIdx == VoxelIdMask)
+                        {
+                            // already fully solid — nothing to do
+                        }
+                        else
+                        {
+                            // already mixed — recurse into existing subdivision
+                            FillBoxTile(tile.Subdivision[subIdx], min, max);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     public (Vector3 min, Vector3 max) VoxelBounds(ulong voxel, float eps)
     {
         var tile = RootTile;

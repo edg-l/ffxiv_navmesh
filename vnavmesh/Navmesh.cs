@@ -5,6 +5,9 @@ using System.Collections.Generic;
 using System.IO;
 using System.IO.Compression;
 using System.Numerics;
+using System.Runtime.CompilerServices;
+
+[assembly: InternalsVisibleTo("vnavmesh.Tests")]
 
 namespace Navmesh;
 
@@ -136,7 +139,7 @@ public record class Navmesh(int CustomizationVersion, QuadGraph? Ground, VoxelMa
 		}
 	}
 
-	private static void SerializeGround(BinaryWriter writer, QuadGraph? graph)
+	internal static void SerializeGround(BinaryWriter writer, QuadGraph? graph)
 	{
 		if (graph == null)
 		{
