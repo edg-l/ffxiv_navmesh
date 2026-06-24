@@ -251,3 +251,78 @@ Plan file: `PLAN2.md` (1170 lines, 11 phases). Do NOT commit it.
 All committed phases build clean: 0 errors, 0 warnings. DotRecast submodule
 is gone. The plugin is now a self-contained FFXIV pathfinding lib with no
 external navmesh dependencies.
+
+## PLAN3 — Any-angle ground pathfinding (CDT/LCT + Polyanya)
+
+Plan file: `PLAN3.md` (do NOT commit). Replaces the Recast-clone ground stack
+(greedy quads → A*-on-centers + funnel) with a modern any-angle navmesh,
+staged and reversible, gated by an offline test harness (`vnavmesh.Tests/`,
+`net10.0-windows`, NOT in the sln). 6 phases (0–6). No in-game verification
+available to the implementer; synthetic scenes are the offline proxy.
+
+### Phases 0–2 (DONE, committed `49e964d`, deployed v1.2.3.33)
+
+Single commit "feat: any-angle ground pathfinding via Polyanya on triangulated
+quads" covers Phase 0 (harness) + Phase 1 (predicates + Polyanya core) + Phase
+2 (wire behind IPC seam, delete old stack):
+
+- `vnavmesh/GroundGraph/Geometry/Predicates.cs` — Shewchuk adaptive
+  Orient2D/InCircle (public domain, managed double-based adaptive expansion).
+- `vnavmesh/GroundGraph/Polyanya/PolyMesh.cs` — triangulate every quad along a
+  FIXED MinX-MaxZ→MaxX-MinZ diagonal, map shared portal spans to interior
+  edges, non-portal sides = obstacle edges, every `Portal.IsOffMesh` →
+  `OffMeshLink`. `static PolyMesh FromQuadGraph(QuadGraph)`.
+- `vnavmesh/GroundGraph/Polyanya/PolyanyaSearch.cs` — interval-node search
+  (Cui/Harabor/Grastien IJCAI 2017): observable + non-observable successors,
+  cul-de-sac + intermediate pruning, binary-heap open list. Off-mesh links
+  handled in the outer A* loop (discrete successor), NOT as zero-width
+  intervals. `range` terminates within range of goal; `range==0` = exact goal.
+- `vnavmesh/GroundGraph/QuadGraph.cs` — `Pathfind` builds/caches
+  `PolyMesh.FromQuadGraph(this)` (invalidated on `BuildAdjacency`/`InitFlags`)
+  and runs `PolyanyaSearch` instead of `QuadPathfind`+`FunnelStringPull`.
+  Signature byte-identical. `useStringPulling`/`useRaycast` are now NO-OPS
+  (any-angle supersedes both; accepted for IPC compat). Reachability gates
+  earlier: `!fromReachable || !toReachable` → empty.
+- DELETED `vnavmesh/GroundGraph/QuadPathfind.cs` + `FunnelStringPull.cs`
+  (deletion compile-guaranteed by the build gate).
+- `vnavmesh/NavVolume/VoxelMap.cs` — added `FillBox(min,max)` (marks every leaf
+  voxel whose center is in `[min,max]` solid, subdividing tiles) for synthetic
+  scene rasterization in the harness.
+- `vnavmesh/Navmesh.cs` — `[assembly: InternalsVisibleTo("vnavmesh.Tests")]`;
+  `SerializeGround` made `internal` for golden-snapshot tests.
+- `vnavmesh.Tests/` — Predicates/Polyanya/Range/funnel-comparison tests,
+  GeometryOracle/ClearanceOracle, golden snapshots, FunnelFixtureCapture
+  (captured funnel reference into `Fixtures/funnel_reference.json` BEFORE the
+  funnel was deleted). **51 tests / 0 skipped** (FlatPlane any-angle unskipped
+  per task 2.5). Goldens in `vnavmesh.Tests/Goldens/`.
+
+Build: 0 errors, 0 warnings. Test gate:
+`~/.dotnet/dotnet test vnavmesh.Tests/vnavmesh.Tests.csproj` → 51/51 pass.
+
+Version note: csproj `<Version>` 1.2.3.31 → .32 (committed) → **.33** (deployed
+for in-game test). PLAN3 says "Phase 2 no version bump" — that refers to the
+SERIALIZATION `Navmesh.Version` (unchanged; Phase 3 bumps it 27→28), NOT the
+plugin package `<Version>`, which is bumped per-publish as usual.
+
+### Needs in-game verification (PLAN3 Phases 0–2)
+- Ground `Nav.Pathfind` (`fly=false`) reaches destinations on real zone meshes;
+  the offline harness only exercises 6 synthetic scenes.
+- Paths are visibly taut/any-angle (no staircase kinks across open quads) and
+  have materially fewer waypoints than the old A*+funnel output.
+- `range`-based queries (`Nav.PathfindWithTolerance`,
+  `SimpleMove.PathfindAndMoveCloseTo`) still stop within tolerance of the goal.
+- IPC consumers (SealHunter, Hunty, Lifestream, AutoDuty, Questionable, …)
+  resolve all ground delegates unchanged; `useStringPulling`-as-no-op does not
+  break any caller (they get a taut path with a different waypoint count).
+- Reachability pruning still excludes islands (`FLAG_UNREACHABLE` honored by
+  Polyanya); player ends up standing on the floor at the final waypoint.
+
+### Remaining PLAN3 phases
+- Phase 3: layer-partitioned fine walkable extraction + contours
+  (`CompactHeightfield`, `LayerPartition`, `ExtractContours`,
+  inter-layer off-mesh links). Bumps `Navmesh.Version` 27→28.
+- Phase 4: CDT mesh from contours, gated by `Config.UseCdtMesh` (code-default
+  false). Bumps `Navmesh.Version` 28→29.
+- Phase 5: LCT clearance (5.1 ship gate = per-edge approximate clearance,
+  reject crossing when `Clearance < 2*agentRadius`). Bumps 29→30.
+- Phase 6: additive `Nav.PathfindWithRadius` IPC + debug viz; consolidation.
