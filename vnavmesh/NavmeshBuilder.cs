@@ -139,130 +139,19 @@ public class NavmeshBuilder
 
         if (Navmesh.Volume != null)
         {
-            // Phase 3: build ground from fine CHF data.
-            var mergedCHF = StitchTileCHFs(tileCHFs);
-            var ground = QuadMesher.GreedyMesh(mergedCHF);
+            // Phase 3: build ground per-tile from fine CHF data into one shared
+            // graph, then connect quads across tile borders via BuildAdjacency.
+            // Meshing per tile (~512x512 cells each) avoids materializing a
+            // full-zone fine grid (8192x8192 = 67M columns at 0.25y), which is a
+            // multi-GB allocation. The border strip of each tile CHF is dropped
+            // inside MeshInto so tiles tile cleanly.
+            var ground = new QuadGraph(BoundsMin, BoundsMax);
+            foreach (var (chf, _, _) in tileCHFs)
+                QuadMesher.MeshInto(ground, chf);
             Navmesh = Navmesh with { Ground = ground };
-            var climbForAdjacency = Settings.AgentMaxClimb;
-            Navmesh.Ground!.BuildAdjacency(climbForAdjacency, Settings.AgentRadius);
-            Navmesh.Ground.InitFlags();
-        }
-    }
-
-    // Stitch per-tile CHFs into a single merged CHF covering the full scene bounds.
-    // Each tile CHF has a border strip of width BorderSize that overlaps with
-    // neighbours; we strip the border before merging (task 3.7 seam healing).
-    private CompactHeightfield StitchTileCHFs(List<(CompactHeightfield chf, int tileX, int tileZ)> tileCHFs)
-    {
-        // Compute the interior (non-border) cell dimensions per tile and the total
-        // dimensions of the merged CHF.
-        if (tileCHFs.Count == 0)
-            throw new InvalidOperationException("No tile CHFs to stitch");
-
-        var first = tileCHFs[0].chf;
-        int border = first.BorderSize;
-        int tileInnerW = first.Width - 2 * border;
-        int tileInnerH = first.Height - 2 * border;
-
-        int totalW = tileInnerW * NumTilesX;
-        int totalH = tileInnerH * NumTilesZ;
-
-        // The merged CHF origin is BoundsMin (no border; border cells were for
-        // overlap with neighbours, stripped here).
-        var mergedBoundsMin = new Vector3(BoundsMin.X, BoundsMin.Y, BoundsMin.Z);
-        int climbVoxels = (int)MathF.Floor(Settings.AgentMaxClimb / Settings.CellHeight);
-        var merged = new CompactHeightfield(
-            mergedBoundsMin, first.CellSize, first.CellHeight,
-            totalW, totalH, 0, climbVoxels, Settings.AgentMaxClimb);
-
-        foreach (var (chf, tx, tz) in tileCHFs)
-        {
-            int baseX = tx * tileInnerW;
-            int baseZ = tz * tileInnerH;
-
-            for (int lz = 0; lz < tileInnerH; lz++)
-            {
-                for (int lx = 0; lx < tileInnerW; lx++)
-                {
-                    int srcX = lx + border;
-                    int srcZ = lz + border;
-                    int dstX = baseX + lx;
-                    int dstZ = baseZ + lz;
-                    if (dstX >= totalW || dstZ >= totalH)
-                        continue;
-
-                    var spans = chf.GetSpans(srcX, srcZ);
-                    foreach (var span in spans)
-                        merged.AddSpanSorted(dstX, dstZ, span.FloorY, span.Area);
-                }
-            }
-        }
-
-        // Task 3.7: tile-seam healing. At the seam between two adjacent tiles
-        // (columns that meet at a tile boundary), ensure the floor-Y values from
-        // both sides agree within CellHeight; if they differ by at most CellHeight,
-        // average them. This compensates for the rasterizer's per-tile clipping.
-        HealTileSeams(merged, tileInnerW, tileInnerH, first.CellHeight);
-
-        merged.FinalizeAllClearances();
-        return merged;
-    }
-
-    // Heal Y mismatches at tile seam columns. For each seam column pair (the last
-    // column of tile n and the first column of tile n+1), if both have a floor span
-    // whose Y values differ by <= CellHeight, average them.
-    private static void HealTileSeams(CompactHeightfield chf, int tileInnerW, int tileInnerH, float cellHeight)
-    {
-        int totalW = chf.Width;
-        int totalH = chf.Height;
-
-        // Vertical seams (between tiles in X).
-        for (int seamX = tileInnerW; seamX < totalW; seamX += tileInnerW)
-        {
-            int leftX = seamX - 1;
-            int rightX = seamX;
-            if (rightX >= totalW)
-                break;
-            for (int z = 0; z < totalH; z++)
-                SnapSeamY(chf.GetSpansMutable(leftX, z), chf.GetSpansMutable(rightX, z), cellHeight);
-        }
-
-        // Horizontal seams (between tiles in Z).
-        for (int seamZ = tileInnerH; seamZ < totalH; seamZ += tileInnerH)
-        {
-            int bottomZ = seamZ - 1;
-            int topZ = seamZ;
-            if (topZ >= totalH)
-                break;
-            for (int x = 0; x < totalW; x++)
-                SnapSeamY(chf.GetSpansMutable(x, bottomZ), chf.GetSpansMutable(x, topZ), cellHeight);
-        }
-    }
-
-    private static void SnapSeamY(List<FloorSpan> a, List<FloorSpan> b, float cellHeight)
-    {
-        // For each span in a, find the closest-Y span in b. If they differ by at
-        // most cellHeight, set both to the average. Only snap walkable spans.
-        for (int i = 0; i < a.Count; i++)
-        {
-            if (a[i].Area == 0) continue;
-            for (int j = 0; j < b.Count; j++)
-            {
-                if (b[j].Area == 0) continue;
-                float diff = MathF.Abs(a[i].FloorY - b[j].FloorY);
-                if (diff <= cellHeight && diff > 0)
-                {
-                    float avg = (a[i].FloorY + b[j].FloorY) * 0.5f;
-                    a[i] = a[i] with { FloorY = avg };
-                    b[j] = b[j] with { FloorY = avg };
-                    break;
-                }
-                else if (diff > cellHeight)
-                {
-                    // Seam Y gap exceeds one cell height; cannot average safely.
-                    Service.Log.Warning($"Tile seam Y mismatch: span A floorY={a[i].FloorY:F4}, span B floorY={b[j].FloorY:F4}, diff={diff:F4} > cellHeight={cellHeight:F4}; seam left unsnapped.");
-                }
-            }
+            ground.BuildAdjacency(Settings.AgentMaxClimb, Settings.AgentRadius);
+            ground.InitFlags();
+            Service.Log.Debug($"[ground] quad graph: {ground.Count} quads, {ground.Portals.Count} portals (per-tile mesh, {tileCHFs.Count} tiles)");
         }
     }
 

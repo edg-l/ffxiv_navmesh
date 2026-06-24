@@ -21,18 +21,31 @@ public static class QuadMesher
     // Build a QuadGraph from a merged CompactHeightfield (fine 0.25y data).
     // Each layer is meshed independently; within-climb seam boundaries between
     // distinct layers become off-mesh links in the graph.
+    // Build a standalone QuadGraph from a single CompactHeightfield. Used by
+    // tests with a whole-scene CHF (BorderSize 0 ⇒ the entire grid is meshed).
     public static QuadGraph GreedyMesh(CompactHeightfield chf)
     {
-        // World bounds of the CHF grid.
         var boundsMin = chf.BoundsMin;
         var boundsMax = new Vector3(
             boundsMin.X + chf.Width * chf.CellSize,
             boundsMin.Y + 2048,  // Y bounds are for search; use full range
             boundsMin.Z + chf.Height * chf.CellSize);
         var graph = new QuadGraph(boundsMin, boundsMax);
+        MeshInto(graph, chf);
+        Service.Log.Debug($"[ground] quad graph: {graph.Count} quads (single CHF, cellSize {chf.CellSize})");
+        return graph;
+    }
 
+    // Mesh one CompactHeightfield's INTERIOR cells (border strip dropped) into an
+    // existing graph, in world coordinates. Production meshes each per-tile CHF
+    // into one shared graph this way — no full-zone fine grid is ever
+    // materialized — and BuildAdjacency then connects quads across tile borders.
+    public static void MeshInto(QuadGraph graph, CompactHeightfield chf)
+    {
         int w = chf.Width;
         int h = chf.Height;
+        int b = chf.BorderSize;
+        int x0 = b, x1 = w - b, z0 = b, z1 = h - b;
 
         // Partition into layers.
         var partition = LayerPartition.Partition(chf);
@@ -68,10 +81,12 @@ public static class QuadMesher
                 }
             }
 
-            // Greedy meshing: extend strips in X, then expand in Z.
-            for (int z = 0; z < h; z++)
+            // Greedy meshing: extend strips in X, then expand in Z. Iterates the
+            // interior cell range [x0,x1) x [z0,z1) so per-tile meshes stop at the
+            // tile boundary (BuildAdjacency reconnects across it).
+            for (int z = z0; z < z1; z++)
             {
-                for (int x = 0; x < w; x++)
+                for (int x = x0; x < x1; x++)
                 {
                     int idx = z * w + x;
                     if (visited[idx] || !walkable[idx])
@@ -81,7 +96,7 @@ public static class QuadMesher
 
                     // Extend strip in X.
                     int xEnd = x;
-                    while (xEnd + 1 < w
+                    while (xEnd + 1 < x1
                         && !visited[z * w + (xEnd + 1)]
                         && walkable[z * w + (xEnd + 1)]
                         && MathF.Abs(surfaceY[z * w + (xEnd + 1)] - surfY) <= SurfaceYEps
@@ -91,7 +106,7 @@ public static class QuadMesher
                     int stripStartX = x;
                     int stripEndX = xEnd;
                     int zEnd = z;
-                    while (zEnd + 1 < h && CanExtendStrip(w, visited, walkable, surfaceY, partition, chf, stripStartX, stripEndX, zEnd, zEnd + 1, surfY, layerId))
+                    while (zEnd + 1 < z1 && CanExtendStrip(w, visited, walkable, surfaceY, partition, chf, stripStartX, stripEndX, zEnd, zEnd + 1, surfY, layerId))
                         ++zEnd;
 
                     for (int markZ = z; markZ <= zEnd; ++markZ)
@@ -106,17 +121,11 @@ public static class QuadMesher
             }
         }
 
-        // Add inter-layer links as off-mesh portals.
+        // Add inter-layer links as off-mesh portals (intra-tile; endpoints are
+        // within this tile's quads).
         var links = LinkExtractor.ExtractInterLayerLinks(partition);
         foreach (var link in links)
-        {
-            // Find nearest quads for each link endpoint and add a bidirectional
-            // off-mesh portal (AddOffMesh handles the portal + adjacency bookkeeping).
             graph.AddOffMesh(link.PosA, link.PosB, Navmesh.AreaId.Shortcut, bidirectional: true);
-        }
-
-        Service.Log.Debug($"[ground] quad graph: {graph.Count} quads, {graph.Portals.Count} portals ({partition.NumLayers} layers, cellSize {chf.CellSize})");
-        return graph;
     }
 
     // Check whether two adjacent cells belong to the same layer (no wall between them).
