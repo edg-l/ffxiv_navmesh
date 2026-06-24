@@ -15,7 +15,7 @@ namespace Navmesh;
 public record class Navmesh(int CustomizationVersion, QuadGraph? Ground, VoxelMap? Volume)
 {
 	public static readonly uint Magic = 0x444D564E; // 'NVMD'
-	public static readonly uint Version = 27;
+	public static readonly uint Version = 28;
 	public const int FLAG_UNREACHABLE = 0x10;
 
 	[Flags]

@@ -218,10 +218,11 @@ public class PolyMesh
                 offMeshCount++;
                 var fromFaces = quadFaces[portal.FromQuad];
                 var toFaces = quadFaces[portal.ToQuad];
-                mesh.OffMeshLinks.Add(new OffMeshLink(fromFaces[0], toFaces[0],
-                    new Vector3(portal.SpanMin.X, portal.YFrom, portal.SpanMin.Y),
-                    new Vector3(portal.SpanMin.X, portal.YTo, portal.SpanMin.Y),
-                    portal.Area));
+                var fromPos = new Vector3(portal.SpanMin.X, portal.YFrom, portal.SpanMin.Y);
+                var toPos = new Vector3(portal.SpanMin.X, portal.YTo, portal.SpanMin.Y);
+                int fromFace = FindFaceContainingPoint(mesh, fromFaces, fromPos.X, fromPos.Z);
+                int toFace = FindFaceContainingPoint(mesh, toFaces, toPos.X, toPos.Z);
+                mesh.OffMeshLinks.Add(new OffMeshLink(fromFace, toFace, fromPos, toPos, portal.Area));
                 continue;
             }
             LinkPortalEdgeRefined(mesh, g, portal, quadBoundary, quadFaces);
@@ -378,6 +379,36 @@ public class PolyMesh
         }
         return -1;
     }
+
+    // Find the face in `faces` whose triangle (XZ projection) contains (x, z).
+    // Falls back to faces[0] if no face contains the point (e.g. point on boundary).
+    private static int FindFaceContainingPoint(PolyMesh mesh, List<int> faces, float x, float z)
+    {
+        foreach (int f in faces)
+        {
+            var face = mesh.Faces[f];
+            var va = mesh.Vertices[face.V0];
+            var vb = mesh.Vertices[face.V1];
+            var vc = mesh.Vertices[face.V2];
+            if (PointInTriangleXZ(x, z, va, vb, vc))
+                return f;
+        }
+        return faces[0];
+    }
+
+    // Test if (x, z) is inside or on the boundary of triangle (a, b, c) in XZ.
+    private static bool PointInTriangleXZ(float x, float z, Vector3 a, Vector3 b, Vector3 c)
+    {
+        float d1 = Sign(x, z, a.X, a.Z, b.X, b.Z);
+        float d2 = Sign(x, z, b.X, b.Z, c.X, c.Z);
+        float d3 = Sign(x, z, c.X, c.Z, a.X, a.Z);
+        bool hasNeg = d1 < 0 || d2 < 0 || d3 < 0;
+        bool hasPos = d1 > 0 || d2 > 0 || d3 > 0;
+        return !(hasNeg && hasPos);
+    }
+
+    private static float Sign(float px, float pz, float ax, float az, float bx, float bz)
+        => (px - bx) * (az - bz) - (ax - bx) * (pz - bz);
 
     private static bool PointOnSegment(float x, float z, Vector3 a, Vector3 b)
     {

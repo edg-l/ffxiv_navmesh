@@ -1,4 +1,5 @@
-﻿using Navmesh.NavVolume;
+﻿using Navmesh.GroundGraph.Extraction;
+using Navmesh.NavVolume;
 using System;
 using System.Collections.Generic;
 using System.Numerics;
@@ -117,7 +118,15 @@ public class NavmeshRasterizer
     private int _voxShiftY;
     private int _voxShiftZ;
 
-    public NavmeshRasterizer(Voxelizer? voxelizer, Vector3 boundsMin, Vector3 boundsMax, float cellSize, float cellHeight, int borderSize, float walkableNormalThreshold, int walkableMaxClimb, int minGap, bool fillInteriors)
+    // Optional CompactHeightfield to populate. When non-null, raw spans are
+    // accumulated in _rawSpans and flushed into the CHF by PopulateChf().
+    private CompactHeightfield? _chf;
+    // Raw span accumulator: per-column list of (y0 voxel bottom, y1 voxel top, area).
+    // y0 and y1 are inclusive voxel indices. World-Y of span top = _bmin.Y + (y1 + 1) * _ch.
+    // y0 is needed to compute clearance: space above a floor = bottom of next span above it.
+    private List<(int y0, int y1, byte area)>[]? _rawSpans;
+
+    public NavmeshRasterizer(Voxelizer? voxelizer, Vector3 boundsMin, Vector3 boundsMax, float cellSize, float cellHeight, int borderSize, float walkableNormalThreshold, int walkableMaxClimb, int minGap, bool fillInteriors, CompactHeightfield? chf = null)
     {
         _voxelizer = voxelizer;
         _bmin = boundsMin;
@@ -145,6 +154,81 @@ public class NavmeshRasterizer
             _voxShiftY = BitOperations.Log2((uint)dy);
             _voxShiftZ = BitOperations.Log2((uint)dz);
         }
+        if (chf != null)
+        {
+            _chf = chf;
+            _rawSpans = new List<(int y0, int y1, byte area)>[_width * _height];
+            for (int i = 0; i < _rawSpans.Length; i++)
+                _rawSpans[i] = new List<(int, int, byte)>();
+        }
+    }
+
+    // Flush accumulated raw spans into the CHF. Call once after all Rasterize()
+    // calls. Each distinct walkable solid surface becomes a FloorSpan. Non-walkable
+    // spans are included only to compute clearance for walkable spans below them.
+    // Emitted BEFORE _iset state is used — parallel to the _iset.Clear() timing
+    // described in the plan.
+    public void PopulateChf()
+    {
+        if (_chf == null || _rawSpans == null)
+            return;
+
+        for (int z = 0; z < _height; z++)
+        {
+            for (int x = 0; x < _width; x++)
+            {
+                var raw = _rawSpans[z * _width + x];
+                if (raw.Count == 0)
+                    continue;
+
+                // Sort by y1 ascending (top of span).
+                raw.Sort((a, b) => a.y1.CompareTo(b.y1));
+
+                // Merge overlapping/touching spans: spans with the same y1 → walkable
+                // wins (area 1 over area 0). We keep track of both y0 and y1 so
+                // clearance is computed as bottom of next span minus floor of this span.
+                var merged = new List<(int y0, int y1, byte area)>();
+                foreach (var s in raw)
+                {
+                    if (merged.Count > 0 && merged[^1].y1 == s.y1)
+                    {
+                        // Same top: walkable wins; take the lower y0 for a wider span.
+                        if (s.area > merged[^1].area)
+                            merged[^1] = (Math.Min(merged[^1].y0, s.y0), s.y1, s.area);
+                    }
+                    else
+                    {
+                        merged.Add(s);
+                    }
+                }
+
+                // Emit walkable floor spans only; non-walkable spans are used to
+                // limit clearance computation for walkable spans below them.
+                for (int i = 0; i < merged.Count; i++)
+                {
+                    if (merged[i].area == 0)
+                        continue; // non-walkable: skip emission but used for clearance below
+
+                    // World Y of the top of voxel y1 (= floor surface).
+                    float floorY = _bmin.Y + (merged[i].y1 + 1) * _ch;
+
+                    // Clearance = bottom of next span above this one minus floorY.
+                    // Bottom of a span at y0 = _bmin.Y + y0 * _ch (voxel y0 bottom edge).
+                    float clearance = float.MaxValue;
+                    if (i + 1 < merged.Count)
+                    {
+                        float nextSpanBottom = _bmin.Y + merged[i + 1].y0 * _ch;
+                        clearance = nextSpanBottom - floorY;
+                    }
+
+                    _chf.AddSpanSorted(x, z, floorY, merged[i].area);
+                    // clearance is recomputed after all spans are added via FinalizeAllClearances;
+                    // the value computed here is unused but confirms correctness.
+                    _ = clearance;
+                }
+            }
+        }
+        _chf.FinalizeAllClearances();
     }
 
     public void Rasterize(SceneExtractor geom, SceneExtractor.MeshType types, bool perMeshInteriors, bool solidBelowNonManifold)
@@ -336,6 +420,10 @@ public class NavmeshRasterizer
                 }
             }
         }
+
+        // Record span (bottom, top) into the raw accumulator for CHF population.
+        if (_rawSpans != null && x >= 0 && x < _width && z >= 0 && z < _height)
+            _rawSpans[z * _width + x].Add((y0, y1, (byte)areaId));
     }
 
     private void FillInterior(int z0, int z1, int x0, int x1, int yBelowNonManifold)

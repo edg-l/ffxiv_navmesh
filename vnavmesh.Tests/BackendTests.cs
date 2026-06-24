@@ -1,5 +1,6 @@
 using Dalamud.Plugin.Services;
 using Navmesh.GroundGraph;
+using Navmesh.GroundGraph.Extraction;
 using Navmesh.NavVolume;
 using Serilog;
 using Serilog.Events;
@@ -49,19 +50,20 @@ public sealed class ServiceFixture : IDisposable
     public void Dispose() { }
 }
 
-// Builds a QuadGraph from a Scene using the same pipeline as NavmeshBuilder.
+// Builds a QuadGraph from a Scene using the CHF-based pipeline (Phase 3).
 internal static class SceneHelper
 {
-    private const float MaxClimbBase = 0.5f;
-    private const float AgentRadius = 0.5f;
+    public const float AgentMaxClimb = 0.5f;
+    public const float AgentRadius = 0.5f;
 
     public static QuadGraph BuildGraph(Scene scene)
     {
-        var vol = scene.Volume;
-        var ground = QuadMesher.GreedyMesh(vol, scene.BoundsMin, scene.BoundsMax);
-        var leafCellSize = vol.Levels[^1].CellSize;
-        var climbForAdjacency = MathF.Max(MaxClimbBase, leafCellSize.Y * 1.5f);
-        ground.BuildAdjacency(climbForAdjacency, AgentRadius);
+        // Build CHF from VoxelMap scan (test-only path; production uses
+        // NavmeshRasterizer.PopulateChf which reads from rasterizer spans directly).
+        var chf = CompactHeightfield.FromVoxelMap(scene.Volume, scene.BoundsMin, scene.BoundsMax, AgentMaxClimb);
+        var ground = QuadMesher.GreedyMesh(chf);
+        // Use exact AgentMaxClimb, matching production (NavmeshBuilder.BuildTiles).
+        ground.BuildAdjacency(AgentMaxClimb, AgentRadius);
         ground.InitFlags();
         return ground;
     }

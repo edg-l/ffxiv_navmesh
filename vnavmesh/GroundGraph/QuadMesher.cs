@@ -1,4 +1,4 @@
-using Navmesh.NavVolume;
+using Navmesh.GroundGraph.Extraction;
 using System;
 using System.Collections.Generic;
 using System.Numerics;
@@ -18,323 +18,138 @@ public static class QuadMesher
 {
     private const float SurfaceYEps = 0.05f;
 
-    public static QuadGraph GreedyMesh(VoxelMap volume, Vector3 boundsMin, Vector3 boundsMax)
+    // Build a QuadGraph from a merged CompactHeightfield (fine 0.25y data).
+    // Each layer is meshed independently; within-climb seam boundaries between
+    // distinct layers become off-mesh links in the graph.
+    public static QuadGraph GreedyMesh(CompactHeightfield chf)
     {
+        // World bounds of the CHF grid.
+        var boundsMin = chf.BoundsMin;
+        var boundsMax = new Vector3(
+            boundsMin.X + chf.Width * chf.CellSize,
+            boundsMin.Y + 2048,  // Y bounds are for search; use full range
+            boundsMin.Z + chf.Height * chf.CellSize);
         var graph = new QuadGraph(boundsMin, boundsMax);
 
-        var leafLevel = volume.Levels[^1];
-        var leafCellSize = leafLevel.CellSize;
-        var origin = volume.RootTile.BoundsMin;
+        int w = chf.Width;
+        int h = chf.Height;
 
-        var totalCellsX = 1;
-        var totalCellsY = 1;
-        var totalCellsZ = 1;
-        foreach (var lvl in volume.Levels)
+        // Partition into layers.
+        var partition = LayerPartition.Partition(chf);
+
+        // Per-layer arrays: visited[z*w+x] = span index already meshed (-1 if not).
+        // We process each layer independently.
+        for (int layerId = 0; layerId < partition.NumLayers; layerId++)
         {
-            totalCellsX *= lvl.NumCellsX;
-            totalCellsY *= lvl.NumCellsY;
-            totalCellsZ *= lvl.NumCellsZ;
-        }
+            // Build flat walkable arrays for this layer.
+            var visited = new bool[w * h];
+            var surfaceY = new float[w * h];
+            var walkable = new bool[w * h];
 
-        var visited = new bool[totalCellsX * totalCellsZ];
-        var surfaceY = new float[totalCellsX * totalCellsZ];
-        var walkable = new bool[totalCellsX * totalCellsZ];
-
-        var rootLevel = volume.Levels[0];
-        var l0Nx = rootLevel.NumCellsX;
-        var l0Ny = rootLevel.NumCellsY;
-        var l0Nz = rootLevel.NumCellsZ;
-        var l0CellSize = rootLevel.CellSize;
-
-        for (int l0z = 0; l0z < l0Nz; ++l0z)
-        {
-            for (int l0x = 0; l0x < l0Nx; ++l0x)
+            for (int z = 0; z < h; z++)
             {
-                for (int l0y = l0Ny - 1; l0y >= 0; --l0y)
+                for (int x = 0; x < w; x++)
                 {
-                    var l0Idx = rootLevel.VoxelToIndex(l0x, l0y, l0z);
-                    var l0Data = volume.RootTile.Contents[l0Idx];
-                    if ((l0Data & VoxelMap.VoxelOccupiedBit) == 0)
-                        continue;
-                    var l0Sub = l0Data & VoxelMap.VoxelIdMask;
-                    if (l0Sub == VoxelMap.VoxelIdMask)
-                        continue;
-
-                    ScanMixedTileForSurfaces(volume.RootTile.Subdivision[l0Sub], volume, origin, leafCellSize, totalCellsX, totalCellsZ, surfaceY, walkable);
-                }
-            }
-        }
-
-        for (int l0z = 0; l0z < l0Nz; ++l0z)
-        {
-            for (int l0x = 0; l0x < l0Nx; ++l0x)
-            {
-                var colFound = false;
-                for (int l0y = l0Ny - 1; l0y >= 0 && !colFound; --l0y)
-                {
-                    var l0Idx = rootLevel.VoxelToIndex(l0x, l0y, l0z);
-                    var l0Data = volume.RootTile.Contents[l0Idx];
-                    if ((l0Data & VoxelMap.VoxelOccupiedBit) != 0)
+                    var spans = chf.GetSpans(x, z);
+                    for (int si = 0; si < spans.Count; si++)
                     {
-                        colFound = true;
-                        if ((l0Data & VoxelMap.VoxelIdMask) != VoxelMap.VoxelIdMask)
+                        if (partition.GetLayer(x, z, si) != layerId) continue;
+                        var span = spans[si];
+                        if (span.Area == 0) continue;
+                        int idx = z * w + x;
+                        // If multiple spans map to this layer (shouldn't happen in a
+                        // correct partition, but guard anyway), take the highest Y.
+                        if (!walkable[idx] || span.FloorY > surfaceY[idx])
                         {
-                            // mixed - already scanned above
-                        }
-                        else
-                        {
-                            // fully solid L0 cell - surface is at its top
-                            var topY = origin.Y + (l0y + 1) * l0CellSize.Y;
-                            MarkColumnRange(volume, origin, leafCellSize, l0x, l0z, l0CellSize, totalCellsX, totalCellsZ, surfaceY, walkable, topY, true);
-                        }
-                    }
-                    else
-                    {
-                        // empty L0 cell - check if L0 cell below is solid
-                        if (l0y > 0)
-                        {
-                            var belowIdx = rootLevel.VoxelToIndex(l0x, l0y - 1, l0z);
-                            var belowData = volume.RootTile.Contents[belowIdx];
-                            if ((belowData & VoxelMap.VoxelOccupiedBit) != 0)
-                            {
-                                colFound = true;
-                                if ((belowData & VoxelMap.VoxelIdMask) == VoxelMap.VoxelIdMask)
-                                {
-                                    // solid below - surface is at top of solid cell
-                                    var topY = origin.Y + l0y * l0CellSize.Y;
-                                    MarkColumnRange(volume, origin, leafCellSize, l0x, l0z, l0CellSize, totalCellsX, totalCellsZ, surfaceY, walkable, topY, false);
-                                }
-                                // if below is mixed, the mixed scan already found the surface
-                            }
+                            walkable[idx] = true;
+                            surfaceY[idx] = span.FloorY;
                         }
                     }
                 }
             }
-        }
 
-        for (int z = 0; z < totalCellsZ; ++z)
-        {
-            for (int x = 0; x < totalCellsX; ++x)
+            // Greedy meshing: extend strips in X, then expand in Z.
+            for (int z = 0; z < h; z++)
             {
-                var idx = z * totalCellsX + x;
-                if (visited[idx] || !walkable[idx])
-                    continue;
+                for (int x = 0; x < w; x++)
+                {
+                    int idx = z * w + x;
+                    if (visited[idx] || !walkable[idx])
+                        continue;
 
-                var surfY = surfaceY[idx];
-                var xEnd = x;
-                while (xEnd + 1 < totalCellsX
-                       && !visited[(z * totalCellsX) + (xEnd + 1)]
-                       && walkable[(z * totalCellsX) + (xEnd + 1)]
-                       && MathF.Abs(surfaceY[(z * totalCellsX) + (xEnd + 1)] - surfY) <= SurfaceYEps
-                       && IsClearBetween(volume, origin, leafCellSize, xEnd, z, xEnd + 1, z, surfY))
-                    ++xEnd;
+                    float surfY = surfaceY[idx];
 
-                int stripStartX = x;
-                int stripEndX = xEnd;
-                int zEnd = z;
-                while (zEnd + 1 < totalCellsZ && CanExtendStrip(totalCellsX, visited, walkable, surfaceY, volume, origin, leafCellSize, stripStartX, stripEndX, zEnd, zEnd + 1, surfY))
-                    ++zEnd;
+                    // Extend strip in X.
+                    int xEnd = x;
+                    while (xEnd + 1 < w
+                        && !visited[z * w + (xEnd + 1)]
+                        && walkable[z * w + (xEnd + 1)]
+                        && MathF.Abs(surfaceY[z * w + (xEnd + 1)] - surfY) <= SurfaceYEps
+                        && IsSameLayer(partition, chf, xEnd, z, xEnd + 1, z, layerId))
+                        ++xEnd;
 
-                for (int markZ = z; markZ <= zEnd; ++markZ)
-                    for (int markX = stripStartX; markX <= stripEndX; ++markX)
-                        visited[markZ * totalCellsX + markX] = true;
+                    int stripStartX = x;
+                    int stripEndX = xEnd;
+                    int zEnd = z;
+                    while (zEnd + 1 < h && CanExtendStrip(w, visited, walkable, surfaceY, partition, chf, stripStartX, stripEndX, zEnd, zEnd + 1, surfY, layerId))
+                        ++zEnd;
 
-                var worldMin = origin + new Vector3(stripStartX * leafCellSize.X, 0, z * leafCellSize.Z);
-                var worldMax = origin + new Vector3((stripEndX + 1) * leafCellSize.X, 0, (zEnd + 1) * leafCellSize.Z);
-                var quad = new Quad(worldMin.X, surfY, worldMin.Z, worldMax.X, surfY, worldMax.Z, Navmesh.AreaId.Default);
-                graph.AddQuad(quad);
+                    for (int markZ = z; markZ <= zEnd; ++markZ)
+                        for (int markX = stripStartX; markX <= stripEndX; ++markX)
+                            visited[markZ * w + markX] = true;
+
+                    var worldMin = new Vector3(chf.CellMinX(stripStartX), surfY, chf.CellMinZ(z));
+                    var worldMax = new Vector3(chf.CellMaxX(stripEndX), surfY, chf.CellMaxZ(zEnd));
+                    var quad = new Quad(worldMin.X, surfY, worldMin.Z, worldMax.X, surfY, worldMax.Z, Navmesh.AreaId.Default);
+                    graph.AddQuad(quad);
+                }
             }
         }
 
-        Service.Log.Debug($"[ground] quad graph: {graph.Count} quads, {graph.Portals.Count} portals (leaf grid {totalCellsX}x{totalCellsZ}, cellSize {leafCellSize})");
+        // Add inter-layer links as off-mesh portals.
+        var links = LinkExtractor.ExtractInterLayerLinks(partition);
+        foreach (var link in links)
+        {
+            // Find nearest quads for each link endpoint and add a bidirectional
+            // off-mesh portal (AddOffMesh handles the portal + adjacency bookkeeping).
+            graph.AddOffMesh(link.PosA, link.PosB, Navmesh.AreaId.Shortcut, bidirectional: true);
+        }
+
+        Service.Log.Debug($"[ground] quad graph: {graph.Count} quads, {graph.Portals.Count} portals ({partition.NumLayers} layers, cellSize {chf.CellSize})");
         return graph;
     }
 
-    private static void ScanMixedTileForSurfaces(VoxelMap.Tile tile, VoxelMap volume, Vector3 origin, Vector3 leafCellSize, int totalCellsX, int totalCellsZ, float[] surfaceY, bool[] walkable)
+    // Check whether two adjacent cells belong to the same layer (no wall between them).
+    private static bool IsSameLayer(LayerPartition partition, CompactHeightfield chf,
+        int x1, int z1, int x2, int z2, int layerId)
     {
-        var ld = tile.LevelDesc;
-        var isLeaf = tile.Level == volume.Levels.Length - 1;
-
-        for (int i = 0; i < tile.Contents.Length; ++i)
+        // Find the span in the target cell that belongs to this layer.
+        var spans2 = chf.GetSpans(x2, z2);
+        for (int ni = 0; ni < spans2.Count; ni++)
         {
-            var data = tile.Contents[i];
-            var occupied = (data & VoxelMap.VoxelOccupiedBit) != 0;
-            var subIdx = data & VoxelMap.VoxelIdMask;
-
-            if (!occupied)
-            {
-                if (isLeaf)
-                {
-                    var (cx, cy, cz) = ld.IndexToVoxel((ushort)i);
-                    var worldPos = tile.VoxelToWorld(cx, cy, cz);
-                    var aboveVoxel = volume.FindLeafVoxel(worldPos);
-                    if (aboveVoxel.empty)
-                    {
-                        var belowPos = worldPos - new Vector3(0, leafCellSize.Y, 0);
-                        var belowVoxel = volume.FindLeafVoxel(belowPos);
-                        if (!belowVoxel.empty)
-                        {
-                            var leafIdxX = (int)((worldPos.X - origin.X) / leafCellSize.X);
-                            var leafIdxZ = (int)((worldPos.Z - origin.Z) / leafCellSize.Z);
-                            if (leafIdxX >= 0 && leafIdxX < totalCellsX && leafIdxZ >= 0 && leafIdxZ < totalCellsZ)
-                            {
-                                var idx = leafIdxZ * totalCellsX + leafIdxX;
-                                var solidTopY = belowPos.Y + leafCellSize.Y * 0.5f;
-                                if (!walkable[idx] || solidTopY > surfaceY[idx])
-                                {
-                                    walkable[idx] = true;
-                                    surfaceY[idx] = solidTopY;
-                                }
-                            }
-                        }
-                    }
-                }
-                continue;
-            }
-
-            if (subIdx == VoxelMap.VoxelIdMask)
-                continue;
-
-            if (isLeaf)
-            {
-                var (cx, cy, cz) = ld.IndexToVoxel((ushort)i);
-                var worldPos = tile.VoxelToWorld(cx, cy, cz);
-                var aboveVoxel = volume.FindLeafVoxel(worldPos);
-                if (aboveVoxel.empty)
-                {
-                    var belowPos = worldPos - new Vector3(0, leafCellSize.Y, 0);
-                    var belowVoxel = volume.FindLeafVoxel(belowPos);
-                    if (!belowVoxel.empty)
-                    {
-                        var leafIdxX = (int)((worldPos.X - origin.X) / leafCellSize.X);
-                        var leafIdxZ = (int)((worldPos.Z - origin.Z) / leafCellSize.Z);
-                        if (leafIdxX >= 0 && leafIdxX < totalCellsX && leafIdxZ >= 0 && leafIdxZ < totalCellsZ)
-                        {
-                            var idx = leafIdxZ * totalCellsX + leafIdxX;
-                            var solidTopY = belowPos.Y + leafCellSize.Y * 0.5f;
-                            if (!walkable[idx] || solidTopY > surfaceY[idx])
-                            {
-                                walkable[idx] = true;
-                                surfaceY[idx] = solidTopY;
-                            }
-                        }
-                    }
-                }
-            }
-            else
-            {
-                ScanMixedTileForSurfaces(tile.Subdivision[subIdx], volume, origin, leafCellSize, totalCellsX, totalCellsZ, surfaceY, walkable);
-            }
+            if (partition.GetLayer(x2, z2, ni) == layerId)
+                return true; // same layer → no wall
         }
+        return false; // target cell not in this layer → wall
     }
 
-    private static void MarkColumnRange(VoxelMap volume, Vector3 origin, Vector3 leafCellSize, int l0x, int l0z, Vector3 l0CellSize, int totalCellsX, int totalCellsZ, float[] surfaceY, bool[] walkable, float approxTopY, bool isSolidTile)
-    {
-        var xStart = (int)((origin.X + l0x * l0CellSize.X - origin.X) / leafCellSize.X);
-        var xEnd = (int)((origin.X + (l0x + 1) * l0CellSize.X - origin.X) / leafCellSize.X);
-        var zStart = (int)((origin.Z + l0z * l0CellSize.Z - origin.Z) / leafCellSize.Z);
-        var zEnd = (int)((origin.Z + (l0z + 1) * l0CellSize.Z - origin.Z) / leafCellSize.Z);
-
-        for (int lz = zStart; lz < zEnd; ++lz)
-        {
-            for (int lx = xStart; lx < xEnd; ++lx)
-            {
-                if (lx < 0 || lx >= totalCellsX || lz < 0 || lz >= totalCellsZ)
-                    continue;
-
-                var probeY = approxTopY;
-                var probePos = origin + new Vector3((lx + 0.5f) * leafCellSize.X, probeY, (lz + 0.5f) * leafCellSize.Z);
-                var aboveVoxel = volume.FindLeafVoxel(probePos);
-                if (!aboveVoxel.empty)
-                {
-                    for (int dy = 0; dy < 64; ++dy)
-                    {
-                        probePos.Y += leafCellSize.Y;
-                        aboveVoxel = volume.FindLeafVoxel(probePos);
-                        if (aboveVoxel.empty)
-                            break;
-                    }
-                }
-
-                if (!aboveVoxel.empty)
-                    continue;
-
-                var belowPos = probePos - new Vector3(0, leafCellSize.Y, 0);
-                var belowVoxel = volume.FindLeafVoxel(belowPos);
-                if (belowVoxel.empty)
-                {
-                    for (int dy = 0; dy < 64; ++dy)
-                    {
-                        belowPos.Y -= leafCellSize.Y;
-                        belowVoxel = volume.FindLeafVoxel(belowPos);
-                        if (!belowVoxel.empty)
-                            break;
-                    }
-                }
-
-                if (belowVoxel.empty)
-                    continue;
-
-                var idx = lz * totalCellsX + lx;
-                var solidTopY = belowPos.Y + leafCellSize.Y * 0.5f;
-                if (!walkable[idx] || solidTopY > surfaceY[idx])
-                {
-                    walkable[idx] = true;
-                    surfaceY[idx] = solidTopY;
-                }
-            }
-        }
-    }
-
-    private static bool CanExtendStrip(int cellsX, bool[] visited, bool[] walkable, float[] surfaceY, VoxelMap volume, Vector3 origin, Vector3 leafCellSize, int xStart, int xEnd, int zFrom, int zTo, float y)
+    private static bool CanExtendStrip(int cellsX, bool[] visited, bool[] walkable, float[] surfaceY,
+        LayerPartition partition, CompactHeightfield chf,
+        int xStart, int xEnd, int zFrom, int zTo, float y, int layerId)
     {
         for (int x = xStart; x <= xEnd; ++x)
         {
-            var idx = zTo * cellsX + x;
+            int idx = zTo * cellsX + x;
             if (visited[idx] || !walkable[idx] || MathF.Abs(surfaceY[idx] - y) > SurfaceYEps)
                 return false;
-            if (!IsClearBetween(volume, origin, leafCellSize, x, zFrom, x, zTo, y))
+            if (!IsSameLayer(partition, chf, x, zFrom, x, zTo, layerId))
                 return false;
         }
         for (int x = xStart; x < xEnd; ++x)
         {
-            if (!IsClearBetween(volume, origin, leafCellSize, x, zTo, x + 1, zTo, y))
+            if (!IsSameLayer(partition, chf, x, zTo, x + 1, zTo, layerId))
                 return false;
         }
-        return true;
-    }
-
-    private static bool IsClearBetween(VoxelMap volume, Vector3 origin, Vector3 leafCellSize, int x1, int z1, int x2, int z2, float surfY)
-    {
-        if (x1 == x2 && z1 == z2)
-            return true;
-
-        var probeY = surfY + leafCellSize.Y * 0.5f;
-
-        if (x1 != x2)
-        {
-            var edgeX = origin.X + (Math.Max(x1, x2)) * leafCellSize.X;
-            var zCenter = origin.Z + (z1 + 0.5f) * leafCellSize.Z;
-            for (int i = 0; i <= 1; ++i)
-            {
-                var probe = new Vector3(edgeX, probeY + i * leafCellSize.Y, zCenter);
-                if (!volume.FindLeafVoxel(probe).empty)
-                    return false;
-            }
-        }
-
-        if (z1 != z2)
-        {
-            var edgeZ = origin.Z + (Math.Max(z1, z2)) * leafCellSize.Z;
-            var xCenter = origin.X + (x1 + 0.5f) * leafCellSize.X;
-            for (int i = 0; i <= 1; ++i)
-            {
-                var probe = new Vector3(xCenter, probeY + i * leafCellSize.Y, edgeZ);
-                if (!volume.FindLeafVoxel(probe).empty)
-                    return false;
-            }
-        }
-
         return true;
     }
 }

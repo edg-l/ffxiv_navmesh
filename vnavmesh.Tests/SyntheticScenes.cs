@@ -98,22 +98,24 @@ public static class SyntheticScenes
     public static Scene BridgeOnramp()
     {
         var vol = CreateMap();
-        // Main deck at Y=0..1, surface at Y=1
+        // Main deck at Y=0..FloorThickness, surface at Y=FloorThickness
         vol.FillBox(new Vector3(BMin.X, 0, -8), new Vector3(BMax.X, FloorThickness, 8));
-        // Ramp: 2 steps from Y=1 to Y=2, each 0.5 high (within climb threshold 0.5)
-        vol.FillBox(new Vector3(8, 0, -4), new Vector3(10, 1.5f, 4));   // surface at Y=1.5
-        vol.FillBox(new Vector3(10, 0, -4), new Vector3(12, 2.0f, 4));  // surface at Y=2.0
-        // Bridge deck at Y=2, surface at Y=2 (same level as top ramp step)
-        vol.FillBox(new Vector3(12, 0, -4), new Vector3(BMax.X, 2.0f, 4));
+        // Ramp: 2 steps, each 0.3125 high (one leaf voxel). Quantized diffs = 0.3125 < AgentMaxClimb=0.5.
+        // Step1 top at Y = FloorThickness + 0.3125 = 1.3125
+        vol.FillBox(new Vector3(8, 0, -4), new Vector3(10, FloorThickness + 0.3125f, 4));
+        // Step2 top at Y = FloorThickness + 0.625 = 1.625
+        vol.FillBox(new Vector3(10, 0, -4), new Vector3(12, FloorThickness + 0.625f, 4));
+        // Bridge deck top at same level as step2
+        vol.FillBox(new Vector3(12, 0, -4), new Vector3(BMax.X, FloorThickness + 0.625f, 4));
 
         float mainSurf = FloorThickness + WalkableYOffset;
-        float stepSurf = 1.5f + WalkableYOffset;
-        float bridgeSurf = 2.0f + WalkableYOffset;
+        float step1Surf = FloorThickness + 0.3125f + WalkableYOffset;
+        float bridgeSurf = FloorThickness + 0.625f + WalkableYOffset;
         var walkable = new List<Vector3>
         {
             new(-15, mainSurf, 0),
             new( 5, mainSurf, 0),
-            new( 9, stepSurf, 0),
+            new( 9, step1Surf, 0),
             new(16, bridgeSurf, 0),
         };
         return new Scene(vol, walkable, BMin, BMax, nameof(BridgeOnramp));
