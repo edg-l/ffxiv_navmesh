@@ -65,10 +65,88 @@ public static class Cdt
         public List<Vector2> Verts = new();
         public List<Tri> Tris = new();
 
+        // A recently-touched live triangle slot, used to seed the point-location
+        // walk for the next Bowyer-Watson insertion (so insertion does not scan
+        // every triangle). Updated to a freshly created fan triangle per insert.
+        public int LastTri = 0;
+
+        // Vertex -> incident triangle slots. A slot index appears in VertTris[v]
+        // while triangle `v` is (or was) incident to vertex v. Entries are NOT
+        // eagerly removed when a slot is killed or rewritten to drop a vertex;
+        // readers must filter via TriHasVertex (which checks Alive + membership).
+        // To keep lists short, IndexTri/ReindexTri append fresh memberships and
+        // ReindexTri scrubs the stale vertex from a rewritten slot's old owners.
+        public List<List<int>> VertTris = new();
+
+        // Ensure VertTris has an entry for every current vertex.
+        public void EnsureVertCapacity()
+        {
+            while (VertTris.Count < Verts.Count)
+                VertTris.Add(new List<int>());
+        }
+
+        // Does live triangle slot t currently have vertex v as a corner?
+        public bool TriHasVertex(int t, int v)
+        {
+            var tr = Tris[t];
+            return tr.Alive && (tr.V0 == v || tr.V1 == v || tr.V2 == v);
+        }
+
+        // Record slot t as incident to each of its three current vertices.
+        private void IndexTri(int t)
+        {
+            var tr = Tris[t];
+            AddIncidence(tr.V0, t);
+            AddIncidence(tr.V1, t);
+            AddIncidence(tr.V2, t);
+        }
+
+        private void AddIncidence(int v, int t)
+        {
+            if (v < 0) return;
+            EnsureVertCapacity();
+            var list = VertTris[v];
+            // Avoid duplicate live entries for the same slot (cheap: lists are short).
+            for (int i = 0; i < list.Count; i++)
+                if (list[i] == t) return;
+            list.Add(t);
+        }
+
+        // Re-index a slot whose vertices changed in place (FlipEdge). Add the slot
+        // to its new vertices' lists; stale memberships in vertices it no longer
+        // touches are filtered out by readers via TriHasVertex. Periodically scrub
+        // the old vertices' lists so they cannot grow without bound under heavy
+        // flipping.
+        public void ReindexTri(int t, int oldV0, int oldV1, int oldV2)
+        {
+            ScrubStale(oldV0);
+            ScrubStale(oldV1);
+            ScrubStale(oldV2);
+            IndexTri(t);
+        }
+
+        // Drop dead/no-longer-incident slots from a single vertex's incident list.
+        public void ScrubStale(int v)
+        {
+            if (v < 0 || v >= VertTris.Count) return;
+            var list = VertTris[v];
+            int w = 0;
+            for (int i = 0; i < list.Count; i++)
+            {
+                int t = list[i];
+                if (TriHasVertex(t, v))
+                    list[w++] = t;
+            }
+            if (w < list.Count)
+                list.RemoveRange(w, list.Count - w);
+        }
+
         public int AddTri(int v0, int v1, int v2)
         {
             Tris.Add(new Tri { V0 = v0, V1 = v1, V2 = v2, N0 = -1, N1 = -1, N2 = -1, Alive = true });
-            return Tris.Count - 1;
+            int t = Tris.Count - 1;
+            IndexTri(t);
+            return t;
         }
 
         // Edge e of triangle t goes from vertex `e` to vertex `(e+1)%3`.
@@ -148,9 +226,18 @@ public static class Cdt
         EnsureCcw(mesh, ref s0, ref s1, ref s2);
         mesh.AddTri(s0, s1, s2);
 
-        // 2. Incremental Bowyer-Watson insertion of each real input vertex.
-        for (int vi = 0; vi < inputVerts.Count; vi++)
-            InsertPoint(mesh, vi);
+        // 2. Incremental Bowyer-Watson insertion of each real input vertex, in
+        //    spatially-coherent (Hilbert-curve) order. Inserting consecutive points
+        //    that are close in the plane keeps each insertion's cavity small and the
+        //    point-location walk short; inserting in raw index order (which, for a
+        //    contour, marches monotonically across the extent) makes every new point
+        //    fall inside the huge sliver circumcircles of its just-inserted
+        //    predecessors, ballooning cavities to O(N) and the whole phase to O(N^2).
+        //    The Delaunay triangulation is order-independent, so this only changes
+        //    intermediate state, not the final mesh.
+        var order = HilbertOrder(inputVerts, minX, minY, dmax);
+        for (int i = 0; i < order.Length; i++)
+            InsertPoint(mesh, order[i]);
 
         // 3. Enforce each constraint segment as a mesh edge by edge-flipping.
         foreach (var c in constraints)
@@ -210,6 +297,57 @@ public static class Cdt
         return result;
     }
 
+    // Order input-vertex indices along a Hilbert space-filling curve so that
+    // consecutive insertions are spatially close (small cavities, short locate
+    // walks). Coordinates are quantised to a 2^bits grid over the bounding box.
+    private static int[] HilbertOrder(IReadOnlyList<Vector2> verts, float minX, float minY, float extent)
+    {
+        int n = verts.Count;
+        var order = new int[n];
+        for (int i = 0; i < n; i++)
+            order[i] = i;
+        if (extent <= 0f)
+            return order;
+
+        const int bits = 16;
+        const int side = 1 << bits;
+        float scale = (side - 1) / extent;
+        var keys = new ulong[n];
+        for (int i = 0; i < n; i++)
+        {
+            uint hx = (uint)Math.Clamp((int)((verts[i].X - minX) * scale + 0.5f), 0, side - 1);
+            uint hy = (uint)Math.Clamp((int)((verts[i].Y - minY) * scale + 0.5f), 0, side - 1);
+            keys[i] = HilbertD2XY(bits, hx, hy);
+        }
+        Array.Sort(keys, order);
+        return order;
+    }
+
+    // Map (x,y) grid coordinates to their 1-D distance along a Hilbert curve of
+    // the given order (canonical xy2d from Wikipedia's Hilbert-curve article).
+    private static ulong HilbertD2XY(int bits, uint x, uint y)
+    {
+        uint nside = 1u << bits;
+        ulong d = 0;
+        for (uint s = nside / 2; s > 0; s /= 2)
+        {
+            uint rx = (uint)((x & s) > 0 ? 1 : 0);
+            uint ry = (uint)((y & s) > 0 ? 1 : 0);
+            d += (ulong)s * (ulong)s * ((3 * rx) ^ ry);
+            // Rotate/reflect the quadrant.
+            if (ry == 0)
+            {
+                if (rx == 1)
+                {
+                    x = nside - 1 - x;
+                    y = nside - 1 - y;
+                }
+                (x, y) = (y, x);
+            }
+        }
+        return d;
+    }
+
     private static void EnsureCcw(Mesh mesh, ref int a, ref int b, ref int c)
     {
         if (Predicates.Orient2D(mesh.Verts[a], mesh.Verts[b], mesh.Verts[c]) < 0)
@@ -224,36 +362,47 @@ public static class Cdt
     {
         var p = mesh.Verts[vi];
 
-        // Find all triangles whose circumcircle contains p.
-        var bad = new List<int>();
-        for (int t = 0; t < mesh.Tris.Count; t++)
-        {
-            var tr = mesh.Tris[t];
-            if (!tr.Alive) continue;
-            if (InCircumcircle(mesh, tr, p))
-                bad.Add(t);
-        }
-        if (bad.Count == 0)
-            return; // numerically outside everything (shouldn't happen inside super-triangle)
+        // Locate the triangle containing p by a straight (Lawson) walk from the
+        // last-touched triangle, then flood the Bowyer-Watson cavity outward from
+        // it across neighbour links. The bad-triangle set (every triangle whose
+        // circumcircle contains p) is connected and contains the locating
+        // triangle, so the flood finds exactly the same set the old full-mesh scan
+        // did — without an O(triangles) sweep per insertion.
+        int seed = LocateTriangle(mesh, p);
+        if (seed < 0)
+            return; // p numerically outside the mesh (shouldn't happen inside super-triangle)
 
-        // Collect cavity boundary: an edge of a bad triangle is on the cavity
-        // boundary iff its neighbour is not bad (or absent). Record (a, b,
-        // neighbourTri, neighbourEdge, constrained).
-        var badSet = new HashSet<int>(bad);
+        var bad = new List<int>();
+        var badSet = new HashSet<int>();
+        var stack = new Stack<int>();
+        stack.Push(seed);
+        badSet.Add(seed);
         var boundary = new List<(int a, int b, int nbr, bool constrained)>();
-        foreach (int t in bad)
+        while (stack.Count > 0)
         {
+            int t = stack.Pop();
+            bad.Add(t);
             var tr = mesh.Tris[t];
             for (int e = 0; e < 3; e++)
             {
                 int nbr = tr.GetN(e);
-                if (nbr < 0 || !badSet.Contains(nbr))
+                bool nbrBad = nbr >= 0 && mesh.Tris[nbr].Alive && InCircumcircle(mesh, mesh.Tris[nbr], p);
+                if (nbrBad)
                 {
+                    if (badSet.Add(nbr))
+                        stack.Push(nbr);
+                }
+                else
+                {
+                    // Neighbour is good (or absent): this edge is on the cavity
+                    // boundary.
                     var (a, b) = mesh.EdgeVerts(t, e);
                     boundary.Add((a, b, nbr, tr.GetC(e)));
                 }
             }
         }
+        if (bad.Count == 0)
+            return; // numerically outside everything (shouldn't happen inside super-triangle)
 
         // Delete bad triangles.
         foreach (int t in bad)
@@ -265,8 +414,14 @@ public static class Cdt
 
         // Re-triangulate the cavity: one new triangle per boundary edge, fanned
         // from p. Keep edge order (a -> b) so the new triangle (a, b, p) is CCW
-        // when the boundary edge was CCW around the cavity.
+        // when the boundary edge was CCW around the cavity. Each fan triangle
+        // (a,b,vi) owns two spoke edges incident to vi: edge 1 = (b->vi) and
+        // edge 2 = (vi->a). The fan whose first boundary vertex equals b shares
+        // that b-spoke, so index fans by their `a` vertex to link spokes in O(1)
+        // instead of an O(cavity^2) pairwise scan (cavities on regular grids are
+        // large, so the quadratic scan dominated insertion).
         var newTris = new List<int>(boundary.Count);
+        var fanByA = new Dictionary<int, int>(boundary.Count);
         foreach (var (a, b, nbr, constrained) in boundary)
         {
             int nt = mesh.AddTri(a, b, vi);
@@ -277,28 +432,106 @@ public static class Cdt
             // Link edge 0 to the outside neighbour.
             mesh.SetNeighbour(nt, 0, nbr);
             newTris.Add(nt);
+            fanByA[a] = nt;
         }
 
-        // Link the new triangles to each other along their shared spokes (edges
-        // incident to p). Match by shared vertices.
-        for (int i = 0; i < newTris.Count; i++)
+        // Link each fan's b-spoke (edge 1: b->vi) to the fan that starts at b
+        // (the one with a == b), which owns the matching vi->b spoke. This wires
+        // every shared spoke exactly once.
+        foreach (int nt in newTris)
         {
-            int ti = newTris[i];
-            for (int j = i + 1; j < newTris.Count; j++)
+            var tr = mesh.Tris[nt];
+            int b = tr.V1; // fan triangle is (a, b, vi)
+            if (fanByA.TryGetValue(b, out int other) && other != nt)
+                mesh.SetNeighbour(nt, 1, other);
+        }
+
+        // The cavity boundary vertices accumulated dead-slot entries when the bad
+        // triangles were killed; scrub them so incident lists stay proportional to
+        // true vertex degree rather than to the total number of insertions.
+        var touched = new HashSet<int> { vi };
+        foreach (var (a, b, _, _) in boundary)
+        {
+            touched.Add(a);
+            touched.Add(b);
+        }
+        foreach (int v in touched)
+            mesh.ScrubStale(v);
+
+        // Seed the next insertion's point-location walk from a fan triangle (it
+        // is live and near the just-inserted point).
+        if (newTris.Count > 0)
+            mesh.LastTri = newTris[0];
+    }
+
+    // Locate a live triangle containing point p via a straight (Lawson) walk from
+    // mesh.LastTri. At each triangle, if p lies strictly to the right of any
+    // directed CCW edge (Orient2D < 0), step across that edge into the neighbour;
+    // otherwise p is inside (or on the boundary of) the triangle. Returns the
+    // containing triangle, or -1 if the walk leaves the mesh (p outside the
+    // super-triangle, which should not happen for real input). Bounded by a guard
+    // that falls back to a full scan, preserving correctness on degenerate links.
+    private static int LocateTriangle(Mesh mesh, Vector2 p)
+    {
+        int cur = mesh.LastTri;
+        if (cur < 0 || cur >= mesh.Tris.Count || !mesh.Tris[cur].Alive)
+            cur = FindAnyLiveTri(mesh);
+        if (cur < 0)
+            return -1;
+
+        int guard = mesh.Tris.Count * 3 + 16;
+        while (guard-- > 0)
+        {
+            var tr = mesh.Tris[cur];
+            int next = -1;
+            for (int e = 0; e < 3; e++)
             {
-                int tj = newTris[j];
-                // Find a shared edge (one incident to vi) between ti and tj.
-                for (int e = 1; e < 3; e++) // edges 1 (b->p) and 2 (p->a) touch p
+                var (a, b) = mesh.EdgeVerts(cur, e);
+                // CCW triangle: interior is to the LEFT of each directed edge a->b
+                // (Orient2D > 0). If p is strictly to the right, cross this edge.
+                if (Predicates.Orient2D(mesh.Verts[a], mesh.Verts[b], p) < 0)
                 {
-                    var (ea, eb) = mesh.EdgeVerts(ti, e);
-                    int je = mesh.FindEdge(tj, ea, eb);
-                    if (je >= 0)
+                    int nbr = tr.GetN(e);
+                    if (nbr >= 0 && mesh.Tris[nbr].Alive)
                     {
-                        mesh.SetNeighbour(ti, e, tj);
+                        next = nbr;
+                        break;
                     }
+                    // No neighbour across the edge p is outside of: p is outside
+                    // the mesh. Fall back to a full scan (covers numeric edge
+                    // cases without ever returning a wrong triangle).
+                    return FindContainingTriangle(mesh, p);
                 }
             }
+            if (next < 0)
+                return cur; // p is inside (left of every edge)
+            cur = next;
         }
+        // Walk did not converge (degenerate/cyclic links): fall back to a scan.
+        return FindContainingTriangle(mesh, p);
+    }
+
+    private static int FindAnyLiveTri(Mesh mesh)
+    {
+        for (int t = 0; t < mesh.Tris.Count; t++)
+            if (mesh.Tris[t].Alive)
+                return t;
+        return -1;
+    }
+
+    // Fallback point location: scan for any live triangle whose circumcircle
+    // contains p (sufficient as a Bowyer-Watson seed; the containing triangle
+    // always qualifies). Used only on the rare degenerate walk that fails.
+    private static int FindContainingTriangle(Mesh mesh, Vector2 p)
+    {
+        for (int t = 0; t < mesh.Tris.Count; t++)
+        {
+            var tr = mesh.Tris[t];
+            if (!tr.Alive) continue;
+            if (InCircumcircle(mesh, tr, p))
+                return t;
+        }
+        return -1;
     }
 
     // Is point p strictly inside triangle tr's circumcircle? Uses the robust
@@ -456,7 +689,7 @@ public static class Cdt
             // genuine reflex/degenerate deadlock — skip this one constraint with a
             // warning rather than killing the entire navmesh build (a single
             // missing wall edge is recoverable; a failed build is not).
-            int vm = FindVertexOnOrNearSegment(mesh, va, vb);
+            int vm = FindVertexOnOrNearSegment(mesh, va, vb, CollectStripVertices(mesh, va, vb));
             if (vm >= 0)
             {
                 EnforceConstraint(mesh, va, vm, depth + 1);
@@ -472,11 +705,18 @@ public static class Cdt
 
     private static int FindTriangleWithEdge(Mesh mesh, int a, int b, out int edge)
     {
-        for (int t = 0; t < mesh.Tris.Count; t++)
+        // Edge (a,b) belongs only to triangles incident to vertex a; scan that
+        // small incident list instead of the whole mesh.
+        if (a >= 0 && a < mesh.VertTris.Count)
         {
-            if (!mesh.Tris[t].Alive) continue;
-            int e = mesh.FindEdge(t, a, b);
-            if (e >= 0) { edge = e; return t; }
+            var list = mesh.VertTris[a];
+            for (int i = 0; i < list.Count; i++)
+            {
+                int t = list[i];
+                if (!mesh.TriHasVertex(t, a)) continue;
+                int e = mesh.FindEdge(t, a, b);
+                if (e >= 0) { edge = e; return t; }
+            }
         }
         edge = -1;
         return -1;
@@ -484,25 +724,28 @@ public static class Cdt
 
     private static void MarkConstrained(Mesh mesh, int a, int b)
     {
-        for (int t = 0; t < mesh.Tris.Count; t++)
+        // Edge (a,b) is owned by at most two triangles, both incident to a. Mark
+        // the edge constrained on each (and its symmetric neighbour link).
+        if (a < 0 || a >= mesh.VertTris.Count) return;
+        var list = mesh.VertTris[a];
+        for (int i = 0; i < list.Count; i++)
         {
-            if (!mesh.Tris[t].Alive) continue;
+            int t = list[i];
+            if (!mesh.TriHasVertex(t, a)) continue;
             int e = mesh.FindEdge(t, a, b);
-            if (e >= 0)
+            if (e < 0) continue;
+            var tr = mesh.Tris[t];
+            tr.SetC(e, true);
+            mesh.Tris[t] = tr;
+            int nbr = tr.GetN(e);
+            if (nbr >= 0)
             {
-                var tr = mesh.Tris[t];
-                tr.SetC(e, true);
-                mesh.Tris[t] = tr;
-                int nbr = tr.GetN(e);
-                if (nbr >= 0)
+                int ne = mesh.FindEdge(nbr, a, b);
+                if (ne >= 0)
                 {
-                    int ne = mesh.FindEdge(nbr, a, b);
-                    if (ne >= 0)
-                    {
-                        var ntr = mesh.Tris[nbr];
-                        ntr.SetC(ne, true);
-                        mesh.Tris[nbr] = ntr;
-                    }
+                    var ntr = mesh.Tris[nbr];
+                    ntr.SetC(ne, true);
+                    mesh.Tris[nbr] = ntr;
                 }
             }
         }
@@ -523,23 +766,30 @@ public static class Cdt
         var pb = mesh.Verts[vb];
         var crossings = new List<(int a, int b)>();
 
-        // Find the first triangle around va whose opposite edge the segment crosses.
+        // Find the first triangle around va whose opposite edge the segment
+        // crosses. Only triangles incident to va can be the strip's entry, so scan
+        // va's incident list instead of the whole mesh.
         int curTri = -1;
         int curEdge = -1;
-        for (int t = 0; t < mesh.Tris.Count && curTri < 0; t++)
+        if (va >= 0 && va < mesh.VertTris.Count)
         {
-            var tr = mesh.Tris[t];
-            if (!tr.Alive) continue;
-            int li = tr.V0 == va ? 0 : tr.V1 == va ? 1 : tr.V2 == va ? 2 : -1;
-            if (li < 0) continue;
-            int oppEdge = (li + 1) % 3; // edge opposite va: (li+1)%3 -> (li+2)%3
-            var (ea, eb) = mesh.EdgeVerts(t, oppEdge);
-            if (ea == vb || eb == vb)
-                return crossings; // segment terminates at this triangle's far edge; (va,vb) already an edge
-            if (SegmentsProperlyCross(pa, pb, mesh.Verts[ea], mesh.Verts[eb]))
+            var incident = mesh.VertTris[va];
+            for (int i = 0; i < incident.Count && curTri < 0; i++)
             {
-                curTri = t;
-                curEdge = oppEdge;
+                int t = incident[i];
+                var tr = mesh.Tris[t];
+                if (!tr.Alive) continue;
+                int li = tr.V0 == va ? 0 : tr.V1 == va ? 1 : tr.V2 == va ? 2 : -1;
+                if (li < 0) continue;
+                int oppEdge = (li + 1) % 3; // edge opposite va: (li+1)%3 -> (li+2)%3
+                var (ea, eb) = mesh.EdgeVerts(t, oppEdge);
+                if (ea == vb || eb == vb)
+                    return crossings; // segment terminates at this triangle's far edge; (va,vb) already an edge
+                if (SegmentsProperlyCross(pa, pb, mesh.Verts[ea], mesh.Verts[eb]))
+                {
+                    curTri = t;
+                    curEdge = oppEdge;
+                }
             }
         }
         if (curTri < 0)
@@ -718,10 +968,20 @@ public static class Cdt
         if (Predicates.Orient2D(mesh.Verts[n2v0], mesh.Verts[n2v1], mesh.Verts[n2v2]) < 0)
             (n2v1, n2v2) = (n2v2, n2v1);
 
+        // Old vertex sets of the two rewritten slots, for incidence re-indexing.
+        int oldT0 = tr.V0, oldT1 = tr.V1, oldT2 = tr.V2;
+        int oldN0 = ntr.V0, oldN1 = ntr.V1, oldN2 = ntr.V2;
+
         var t1 = new Tri { V0 = n1v0, V1 = n1v1, V2 = n1v2, N0 = -1, N1 = -1, N2 = -1, Alive = true };
         var t2 = new Tri { V0 = n2v0, V1 = n2v1, V2 = n2v2, N0 = -1, N1 = -1, N2 = -1, Alive = true };
         mesh.Tris[t] = t1;
         mesh.Tris[nbr] = t2;
+
+        // Slot t went (oldT*) -> (apexT, sa, apexN); slot nbr went (oldN*) ->
+        // (apexT, apexN, sb). Refresh the incidence index for the four corner
+        // vertices so the new memberships are recorded and stale ones scrubbed.
+        mesh.ReindexTri(t, oldT0, oldT1, oldT2);
+        mesh.ReindexTri(nbr, oldN0, oldN1, oldN2);
 
         // Re-establish neighbour links + constraint flags for all six edges of the
         // two new triangles.
@@ -790,11 +1050,62 @@ public static class Cdt
         return t > 1e-4f && t < 1f - 1e-4f;
     }
 
+    // Collect a LOCAL candidate set of vertices near segment (va,vb): the corners
+    // of every triangle the segment's strip crosses, plus the corners of triangles
+    // incident to va and vb. A vertex lying on segment (va,vb) is necessarily a
+    // corner of one of the crossed triangles, so this set is sufficient for the
+    // on-segment fallback without scanning all mesh vertices per failed constraint.
+    private static HashSet<int> CollectStripVertices(Mesh mesh, int va, int vb)
+    {
+        var candidates = new HashSet<int>();
+
+        void AddTriCorners(int t)
+        {
+            if (t < 0 || !mesh.Tris[t].Alive) return;
+            var tr = mesh.Tris[t];
+            candidates.Add(tr.V0);
+            candidates.Add(tr.V1);
+            candidates.Add(tr.V2);
+        }
+
+        void AddIncident(int v)
+        {
+            if (v < 0 || v >= mesh.VertTris.Count) return;
+            var list = mesh.VertTris[v];
+            for (int i = 0; i < list.Count; i++)
+                if (mesh.TriHasVertex(list[i], v))
+                    AddTriCorners(list[i]);
+        }
+
+        AddIncident(va);
+        AddIncident(vb);
+
+        // The crossing edges are undirected vertex pairs; both triangles sharing
+        // each crossing own its corners, which include any on-segment blocker.
+        var crossings = CollectCrossingEdges(mesh, va, vb, out _);
+        foreach (var (ea, eb) in crossings)
+        {
+            candidates.Add(ea);
+            candidates.Add(eb);
+            int t = FindTriangleWithEdge(mesh, ea, eb, out int e);
+            if (t >= 0)
+            {
+                AddTriCorners(t);
+                int nbr = mesh.Tris[t].GetN(e);
+                AddTriCorners(nbr);
+            }
+        }
+
+        return candidates;
+    }
+
     // Find an input vertex lying on or very near segment (va,vb) and projecting
     // strictly between its endpoints, nearest to va. Tolerance-based (perpendicular
     // distance), so it catches near-collinear contour vertices that an exact
-    // Orient2D==0 test misses. Returns -1 if none.
-    private static int FindVertexOnOrNearSegment(Mesh mesh, int va, int vb)
+    // Orient2D==0 test misses. Restricted to the supplied local candidate set (the
+    // strip around the segment) so it never scans the whole mesh. Returns -1 if
+    // none.
+    private static int FindVertexOnOrNearSegment(Mesh mesh, int va, int vb, HashSet<int> candidates)
     {
         var pa = mesh.Verts[va];
         var pb = mesh.Verts[vb];
@@ -804,9 +1115,10 @@ public static class Cdt
         const float perpEps = 1e-2f; // world units (~1/25 of a 0.25y cell)
         int best = -1;
         float bestT = float.MaxValue;
-        for (int v = 0; v < mesh.Verts.Count; v++)
+        foreach (int v in candidates)
         {
             if (v == va || v == vb) continue;
+            if (v < 0 || v >= mesh.Verts.Count) continue;
             var p = mesh.Verts[v];
             float t = ((p.X - pa.X) * dx + (p.Y - pa.Y) * dy) / denom;
             if (t <= 1e-4f || t >= 1f - 1e-4f) continue;
