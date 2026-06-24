@@ -21,6 +21,21 @@ public class NavmeshBuilder
     public int NumTilesZ;
     public Navmesh Navmesh; // should not be accessed while building tiles
 
+    // per-stage build durations from the most recent BuildTiles call (benchmark/profiling aid)
+    public struct BuildTimings
+    {
+        public TimeSpan Total;
+        public TimeSpan RasterizeVoxelize; // wall-clock of the parallel per-tile rasterize+voxelize+CHF stage
+        public TimeSpan TileMerge;          // volume tile build + merge into the global volume
+        public TimeSpan GroundMesh;         // CDT BuildMerged or greedy MeshInto
+        public TimeSpan BuildAdjacency;     // greedy-path quad adjacency stitch (0 on CDT path)
+
+        public override readonly string ToString() =>
+            $"total={Total.TotalMilliseconds:F0}ms rasterize+voxelize={RasterizeVoxelize.TotalMilliseconds:F0}ms tileMerge={TileMerge.TotalMilliseconds:F0}ms groundMesh={GroundMesh.TotalMilliseconds:F0}ms adjacency={BuildAdjacency.TotalMilliseconds:F0}ms";
+    }
+
+    public BuildTimings LastBuildTimings { get; private set; }
+
     private NavmeshCustomization customization;
 
     private int _walkableClimbVoxels;
@@ -44,6 +59,26 @@ public class NavmeshBuilder
         Scene = new(scene);
         customization.CustomizeScene(Scene);
 
+        Setup();
+    }
+
+    // offline capture/replay path: build from an ALREADY-extracted + customized
+    // SceneExtractor without re-extracting geometry from the game. The captured
+    // scene was customized at capture time, so CustomizeScene is intentionally
+    // not re-run here; Settings/NumTiles are still read from the customization.
+    public NavmeshBuilder(SceneExtractor scene, NavmeshCustomization customization)
+    {
+        Settings = customization.Settings;
+        this.customization = customization;
+
+        Scene = scene;
+
+        Setup();
+    }
+
+    [System.Diagnostics.CodeAnalysis.MemberNotNull(nameof(Navmesh))]
+    private void Setup()
+    {
         BoundsMin = new(-1024);
         BoundsMax = new(1024);
         NumTilesX = NumTilesZ = Settings.NumTiles[0];
@@ -79,6 +114,9 @@ public class NavmeshBuilder
 
     public void BuildTiles(Action? onTileFinished = null)
     {
+        var timings = new BuildTimings();
+        var swTotal = System.Diagnostics.Stopwatch.StartNew();
+        var sw = new System.Diagnostics.Stopwatch();
         int threadCount;
 
         var maxThreads = Environment.ProcessorCount;
@@ -101,6 +139,7 @@ public class NavmeshBuilder
                 tileCoords.Add((x, z));
 
         var options = new ParallelOptions { MaxDegreeOfParallelism = threadCount };
+        sw.Restart();
         Parallel.ForEach(tileCoords, options, coord =>
         {
             var (x0, z0) = coord;
@@ -117,9 +156,11 @@ public class NavmeshBuilder
             tileResults[idx] = (tileVolume, chf, tileX, tileZ);
             onTileFinished?.Invoke();
         });
+        timings.RasterizeVoxelize = sw.Elapsed;
 
         // Collect per-tile results. VoxelMap tiles are merged into the global volume;
         // CHFs are stitched together into a single merged CHF for ground extraction.
+        sw.Restart();
         var tileCHFs = new List<(CompactHeightfield chf, int tileX, int tileZ)>();
         foreach (var (tileVolume, tileCHF, tileX, tileZ) in tileResults)
         {
@@ -128,6 +169,7 @@ public class NavmeshBuilder
             if (tileCHF != null)
                 tileCHFs.Add((tileCHF, tileX, tileZ));
         }
+        timings.TileMerge = sw.Elapsed;
 
         if (Navmesh.Volume != null)
         {
@@ -145,7 +187,9 @@ public class NavmeshBuilder
                 var chfs = new List<CompactHeightfield>(tileCHFs.Count);
                 foreach (var (chf, _, _) in tileCHFs)
                     chfs.Add(chf);
+                sw.Restart();
                 var cdtMesh = GroundGraph.CDT.CdtMeshBuilder.BuildMerged(chfs);
+                timings.GroundMesh = sw.Elapsed;
                 ground.MaxClimb = Settings.AgentMaxClimb;
                 ground.SetCdtMesh(cdtMesh);
                 ground.InitFlags();
@@ -154,14 +198,23 @@ public class NavmeshBuilder
             }
             else
             {
+                sw.Restart();
                 foreach (var (chf, _, _) in tileCHFs)
                     QuadMesher.MeshInto(ground, chf);
+                timings.GroundMesh = sw.Elapsed;
                 Navmesh = Navmesh with { Ground = ground };
+                sw.Restart();
                 ground.BuildAdjacency(Settings.AgentMaxClimb, Settings.AgentRadius);
+                timings.BuildAdjacency = sw.Elapsed;
                 ground.InitFlags();
                 Service.Log.Debug($"[ground] quad graph: {ground.Count} quads, {ground.Portals.Count} portals (per-tile mesh, {tileCHFs.Count} tiles)");
             }
         }
+
+        swTotal.Stop();
+        timings.Total = swTotal.Elapsed;
+        LastBuildTimings = timings;
+        Service.Log.Debug($"[build timings] {timings}");
     }
 
     private static void MergeTile(VoxelMap parent, int x, int z, VoxelMap child)

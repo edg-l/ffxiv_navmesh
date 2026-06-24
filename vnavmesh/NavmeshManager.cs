@@ -130,6 +130,37 @@ public sealed class NavmeshManager : IDisposable
 		OnNavmeshChanged?.Invoke(Navmesh, Query);
 	}
 
+	// [dev] capture the raw collision geometry for the CURRENT territory and write
+	// it to a .scene file for offline replay of the whole build pipeline. Extracts
+	// + customizes the scene exactly as BuildNavmesh does (minus the actual build),
+	// so the captured scene is already customized. Must run on the framework thread
+	// (the game extraction is unsafe). Returns the written path, or null on failure.
+	public unsafe string? ExportSceneCapture()
+	{
+		try
+		{
+			var scene = new SceneDefinition();
+			scene.FillFromActiveLayout();
+			var cacheKey = GetCacheKey(scene);
+			var customization = NavmeshCustomizationRegistry.ForTerritory(scene.TerritoryID);
+
+			var extractor = new SceneExtractor(scene);
+			customization.CustomizeScene(extractor);
+
+			var dir = new DirectoryInfo($"{Service.PluginInterface.GetPluginConfigDirectory()}/scenecapture");
+			dir.Create();
+			var path = $"{dir.FullName}/{cacheKey}.scene";
+			SceneExtractorSerialization.SerializeToFile(extractor, path);
+			Service.Log.Debug($"Exported scene capture for '{cacheKey}' ({extractor.Meshes.Count} meshes) to {path}");
+			return path;
+		}
+		catch (Exception ex)
+		{
+			Service.Log.Error($"Failed to export scene capture: {ex}");
+			return null;
+		}
+	}
+
 	private static bool InCutscene => Service.Condition[ConditionFlag.WatchingCutscene] || Service.Condition[ConditionFlag.OccupiedInCutSceneEvent];
 
 	public Task<List<Waypoint>> QueryPath(Vector3 from, Vector3 to, bool flying, float range = 0, CancellationToken externalCancel = default)

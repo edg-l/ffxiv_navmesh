@@ -81,6 +81,12 @@ public class SceneExtractor
         _meshPlane = BuildPlaneMesh();
     }
 
+    // empty scene with no meshes; used by the capture/replay deserializer which
+    // populates Meshes directly instead of extracting from game memory.
+    private SceneExtractor() { }
+
+    public static SceneExtractor CreateEmpty() => new();
+
     public unsafe SceneExtractor(SceneDefinition scene)
     {
         Meshes[_keyAnalyticBox] = new() { Parts = _meshBox, MeshType = MeshType.AnalyticShape };

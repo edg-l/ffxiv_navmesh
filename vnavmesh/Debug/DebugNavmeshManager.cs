@@ -54,6 +54,9 @@ class DebugNavmeshManager : IDisposable
 			ImGui.SameLine();
 			if (ImGui.Button("Rebuild"))
 				_manager.Reload(false);
+			ImGui.SameLine();
+			if (ImGui.Button("[dev] Export scene"))
+				_manager.ExportSceneCapture();
 		}
 		ImGui.SameLine();
 		ImGui.TextUnformatted(_manager.CurrentKey);
