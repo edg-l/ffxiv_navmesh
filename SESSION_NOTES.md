@@ -317,10 +317,53 @@ plugin package `<Version>`, which is bumped per-publish as usual.
 - Reachability pruning still excludes islands (`FLAG_UNREACHABLE` honored by
   Polyanya); player ends up standing on the floor at the final waypoint.
 
+### Phase 3 (DONE, committed `d44067f`, deployed v1.2.3.36)
+
+Root cause found via the `RealNavmeshDiag` harness on the real Limsa navmesh:
+ground pathfind failed because the **2y voxel resolution fragmented the quad
+graph** — 1210 connected components, 837 isolated singletons, ramps split
+because at 2y a walkable ramp steps 4y between cells (> climb=3). The fine
+0.25y rasterization already existed but was downsampled to 2y before the ground
+mesher saw it. Phase 3 extracts the ground mesh from the fine data instead.
+
+- `NavmeshRasterizer`: accumulates raw spans `(y0,y1,area)`; `PopulateChf()`
+  flushes the fine `CompactHeightfield` before rasterizer state is discarded.
+- `GroundGraph/Extraction/CompactHeightfield.cs`: per-tile fine 0.25y walkable
+  grid; per-column floors at solid-span TOP (GAP2 fix) + clearance
+  (bottom-of-ceiling → floor). `FromVoxelMap` is a test-only helper.
+- `GroundGraph/Extraction/LayerPartition.cs`: 4-connected within-climb layering;
+  contour extraction with collinear merge (loop assembly deferred to Phase 4
+  CDT); inter-layer links (within-climb seams → off-mesh links, over-climb →
+  walls).
+- `QuadMesher.GreedyMesh` rewritten to mesh per layer from the merged CHF.
+  DELETED `ScanMixedTileForSurfaces`/`MarkColumnRange`/2y `IsClearBetween`
+  (`rg` → 0). Ground extraction never reads the 2y VoxelMap; the octree now
+  serves flight only.
+- `NavmeshBuilder`: per-tile CHF, `StitchTileCHFs` (drop border cells) +
+  `HealTileSeams` (snap/average flanking floor-Y within CellHeight; warns when
+  the gap exceeds CellHeight).
+- `PolyMesh.FromQuadGraph`: off-mesh link endpoints resolve to the triangle
+  containing them (not face[0]), so inter-layer ramp links route correctly.
+- `Navmesh.Version` 27→28. `LayerTests` + `Phase3GeometryTests` (73 tests
+  total). Connectivity validated at the EXACT production climb (0.5), not a
+  margin: Overpass → 2 disjoint layers; BridgeOnramp/Staircase within-climb →
+  1 component; over-climb → disconnected. Goldens regenerated.
+
+Build 0/0, tests 73/73. Code-reviewed; 6 findings fixed (test-climb fidelity,
+seam-gap warning, collinear merge, clearance y0, CHF null-volume guard, off-mesh
+face selection).
+
+### Needs in-game verification (Phase 3)
+- Rebuild a real multi-level zone (`/vnav rebuild` in Limsa `s1t2`) on v1.2.3.36+
+  and re-upload the `.navmesh`; the `RealNavmeshDiag` harness (now v28) should
+  show the quad graph collapsing from ~1210 components to a few, and the
+  ramp/corner from→to landing in ONE component.
+- Walk down the ramp + corner that previously had no path; confirm `ground OK`
+  with `wps>0` in the devlog and the player follows it.
+- Confirm ledges/walls still block (over-climb seams stayed walls, not links).
+- Synthetic fuzz is a proxy; real-zone CDT robustness is Phase 4's risk.
+
 ### Remaining PLAN3 phases
-- Phase 3: layer-partitioned fine walkable extraction + contours
-  (`CompactHeightfield`, `LayerPartition`, `ExtractContours`,
-  inter-layer off-mesh links). Bumps `Navmesh.Version` 27→28.
 - Phase 4: CDT mesh from contours, gated by `Config.UseCdtMesh` (code-default
   false). Bumps `Navmesh.Version` 28→29.
 - Phase 5: LCT clearance (5.1 ship gate = per-edge approximate clearance,
